@@ -3,6 +3,9 @@
 [![PyPI - Downloads](https://img.shields.io/pypi/dm/pyfanotify)](https://pypi.org/project/pyfanotify/)
 [![PyPI - License](https://img.shields.io/pypi/l/pyfanotify)](https://github.com/baskiton/pyfanotify/blob/main/LICENSE)
 
+[![build](https://github.com/baskiton/pyfanotify/actions/workflows/build.yml/badge.svg)](https://github.com/baskiton/pyfanotify/actions/workflows/build.yml)
+[![upload](https://github.com/baskiton/pyfanotify/actions/workflows/pypi-upload.yml/badge.svg)](https://github.com/baskiton/pyfanotify/actions/workflows/pypi-upload.yml)
+
 Python wrapper for Linux pyfanotify.\
 See [fanotify manpage][man_fanotify] for more details.
 
