@@ -112,6 +112,7 @@ class Fanotify(mp.Process):
     def __init__(self, init_fid=False, check_all_mp=False, log: logging.Logger = None,
                  fn: Callable = None, fn_args: Tuple = (), fn_timeout: int = 0):
         super().__init__(name='Fanotify')
+        self._log = log
 
         try:
             ext.mark(FAN_NOFD, FAN_MARK_ADD, FAN_MODIFY | FAN_CLOSE_WRITE | FAN_EVENT_ON_CHILD, AT_FDCWD, '')
@@ -133,7 +134,6 @@ class Fanotify(mp.Process):
             self._exception(f'{e}')
             raise
 
-        self._log = log
         self._rd, self._wr = mp.Pipe(False)
         self._pid = os.getpid()
         self._check_all_mp = check_all_mp
