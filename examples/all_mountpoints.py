@@ -7,7 +7,7 @@ import pysetns as ns
 
 
 def mark_mounts_target(n):
-    for path in '/proc/%s/mounts' % n.target_pid, '/proc/self/mounts':
+    for path in f'/proc/{n.target_pid}/mounts', '/proc/self/mounts':
         try:
             for ln in open(path).readlines():
                 fsname, mp, fs_type, opts, freq, passno = ln.split()
@@ -23,7 +23,7 @@ def mark_mounts(pid, namespaces=ns.NS_ALL):
     n = ns.Namespace(pid, namespaces, keep_caps=True)
     n.enter(mark_mounts_target, n)
     if n.errors:
-        fanot._debug('NS errors: %s', n.errors)
+        fanot._debug(f'NS errors: {n.errors}')
     return n.retry
 
 
@@ -41,7 +41,6 @@ def get_mounts():
 
 def mounts_upd():
     global _old_mounts
-    print('check')
 
     mounts = get_mounts()
     if mounts != _old_mounts:
@@ -56,7 +55,6 @@ def mounts_upd():
 
 if __name__ == '__main__':
     _old_mounts = 0
-
     mounts_upd_timeout = 10
     fanot = fan.Fanotify(fn=mounts_upd, fn_timeout=mounts_upd_timeout)
     fanot.start()
