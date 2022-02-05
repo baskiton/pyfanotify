@@ -40,7 +40,7 @@ setup(
     description='Python wrapper for Linux fanotify',
     long_description=get_file('README.md'),
     long_description_content_type='text/markdown',
-    packages=find_packages(),
+    packages=find_packages(exclude=('docs', 'examples')),
     ext_modules=[ext],
     classifiers=[
         'License :: OSI Approved :: MIT License',

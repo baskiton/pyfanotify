@@ -1,13 +1,16 @@
 # pyfanotify
-[![PyPI](https://img.shields.io/pypi/v/pyfanotify)](https://pypi.org/project/pyfanotify/)
-[![PyPI - Downloads](https://img.shields.io/pypi/dm/pyfanotify)](https://pypi.org/project/pyfanotify/)
-[![PyPI - License](https://img.shields.io/pypi/l/pyfanotify)](https://github.com/baskiton/pyfanotify/blob/main/LICENSE)
+[![PyPI](https://img.shields.io/pypi/v/pyfanotify?logo=python&logoColor=white)][pypi_proj]
+[![PyPI - Downloads](https://img.shields.io/pypi/dm/pyfanotify?logo=python&logoColor=white)][pypi_proj]
+[![PyPI - License](https://img.shields.io/pypi/l/pyfanotify?logo=open-source-initiative&logoColor=white)](https://github.com/baskiton/pyfanotify/blob/main/LICENSE)
 
-[![build](https://github.com/baskiton/pyfanotify/actions/workflows/build.yml/badge.svg)](https://github.com/baskiton/pyfanotify/actions/workflows/build.yml)
-[![upload](https://github.com/baskiton/pyfanotify/actions/workflows/pypi-upload.yml/badge.svg)](https://github.com/baskiton/pyfanotify/actions/workflows/pypi-upload.yml)
+[![build](https://img.shields.io/github/workflow/status/baskiton/pyfanotify/build?logo=github)](https://github.com/baskiton/pyfanotify/actions/workflows/build.yml)
+[![upload](https://img.shields.io/github/workflow/status/baskiton/pyfanotify/upload?label=upload&logo=github)](https://github.com/baskiton/pyfanotify/actions/workflows/pypi-upload.yml)
+[![docs](https://img.shields.io/readthedocs/pyfanotify?logo=readthedocs&logoColor=white)][documentation]
 
-Python wrapper for Linux pyfanotify.\
+Python wrapper for Linux fanotify. \
 See [fanotify manpage][man_fanotify] for more details.
+
+To detail see the [documentation][documentation]
 
 ### IMPORTANT!
 `fanotify` requires execution from **ROOT**!
@@ -16,17 +19,22 @@ See [fanotify manpage][man_fanotify] for more details.
  * Python 3.6+
 
 ## Installing
-`pip install pyfanotify`
-
-## Building
-To build for your platform:
+### Using PIP
+```sh
+$ pip install pyfanotify
 ```
-python -m build
-pip install dist/<target_tar or wheel>
+### From sources
+```sh
+$ git clone https://github.com/baskiton/pyfanotify.git
+$ cd pyfanotify
+$ python setup.py install
 ```
 
 ## Usage
-See [examples][examples] directory
+See [examples][examples]
 
+
+[pypi_proj]: https://pypi.org/project/pyfanotify/
 [man_fanotify]: https://man7.org/linux/man-pages/man7/fanotify.7.html
 [examples]: https://github.com/baskiton/pyfanotify/blob/main/examples
+[documentation]: https://pyfanotify.readthedocs.io
