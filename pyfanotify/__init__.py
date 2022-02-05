@@ -109,8 +109,25 @@ _CMD_DISCONNECT = ext.CMD_DISCONNECT
 
 
 class Fanotify(mp.Process):
-    def __init__(self, init_fid=False, check_all_mp=False, log: logging.Logger = None,
+    """
+    Wrapper for Linux fanotify. Runs in a new process.
+    """
+
+    def __init__(self, init_fid: bool = False, log: logging.Logger = None,
                  fn: Callable = None, fn_args: Tuple = (), fn_timeout: int = 0):
+        """
+        :param init_fid: See **man fanotify_init** for FAN_REPORT_FID
+            and FAN_REPORT_DIR_FID
+        :param log: Logger
+        :param fn: Function that will be called after the specified `fn_timeout`
+        :param fn_args: Arguments for `fn`
+        :param fn_timeout: Timeout for `fn`
+
+        :raises OSError: if fanotify is not set in kernel or other fanotify
+            error (see man fanotify_init)
+        :raises TypeError: if `fn` is not callable or `fn_args` is not tuple
+        """
+
         super().__init__(name='Fanotify')
         self._log = log
 
@@ -136,7 +153,6 @@ class Fanotify(mp.Process):
 
         self._rd, self._wr = mp.Pipe(False)
         self._pid = os.getpid()
-        self._check_all_mp = check_all_mp
         self._is_ready = True
 
         if fn and not callable(fn):
@@ -150,6 +166,10 @@ class Fanotify(mp.Process):
         atexit.register(lambda x: (x.stop(), x.join()), self)
 
     def start(self) -> None:
+        """
+        Start Fanotify process
+        """
+
         if self._is_ready:
             self._is_ready = False
             super(Fanotify, self).start()
@@ -165,6 +185,10 @@ class Fanotify(mp.Process):
             self._debug('finish')
 
     def stop(self) -> None:
+        """
+        Stop Fanotify process
+        """
+
         if self._wr:
             self._wr.send((_CMD_STOP,))
         self.join()
@@ -172,17 +196,44 @@ class Fanotify(mp.Process):
         self._wr = self._rd = None
 
     def connect(self, rule: FanoRule) -> None:
+        """
+        Add :class:`FanoRule` to receive events on it
+        """
+
         if not isinstance(rule, FanoRule):
             raise TypeError(f'Got {type(rule).__name__}, FanoRule expected')
         self._wr.send((_CMD_CONNECT, rule))
 
     def disconnect(self, rule: FanoRule) -> None:
+        """
+        Delete the :class:`FanoRule` so as not to receive events for it
+        """
+
         if not isinstance(rule, FanoRule):
             raise TypeError(f'Got {type(rule).__name__}, FanoRule expected')
         self._wr.send((_CMD_DISCONNECT, rule))
 
     def mark(self, path: Union[str, Iterable], ev_types: int = FAN_ALL_EVENTS,
-             is_type: str = '', no_symlink: bool = False) -> None:
+             is_type: str = '', dont_follow: bool = False) -> None:
+        """
+        To detail see **man fanotify_mark**
+
+        The events in `ev_types` will be added to the mark mask (or to
+        the ignore mask). `ev_types` must be nonempty
+
+        :param path: path to be marked
+        :param ev_types: defines which events shall be listened for (or which
+            shall be ignored). It is a bit mask composed values. See man
+        :param is_type: type of `path`. It can be:
+
+            - ``'mp'`` - is mountpoint
+            - ``'fs'`` - is file system
+            - ``'dir'`` - is directory
+
+        :param dont_follow: if `path` is a symbolic link, mark the link itself,
+            rather than the file to which it refers.
+        """
+
         if isinstance(path, str):
             flags = FAN_MARK_ADD
             if is_type == 'mp':
@@ -191,7 +242,7 @@ class Fanotify(mp.Process):
                 flags |= FAN_MARK_FILESYSTEM
             elif is_type == 'dir':
                 flags |= FAN_MARK_ONLYDIR
-            if no_symlink:
+            if dont_follow:
                 flags |= FAN_MARK_DONT_FOLLOW
 
             try:
@@ -206,9 +257,18 @@ class Fanotify(mp.Process):
                 self._exception(msg)
         elif isinstance(path, Iterable):
             for p in path:
-                self.mark(p, ev_types, is_type, no_symlink)
+                self.mark(p, ev_types, is_type, dont_follow)
 
     def unmark(self, ev_types: int = FAN_ALL_EVENTS) -> None:
+        """
+        To detail see **man fanotify_mark**
+
+        The events in `ev_types` will be removed from the mark
+        mask (or from the ignore mask). `ev_types` must be nonempty
+
+        :param ev_types: same as in :meth:`Fanotify.mark`
+        """
+
         try:
             ext.mark(self._fd, FAN_MARK_REMOVE, ev_types, AT_FDCWD)
         except OSError as e:
@@ -218,12 +278,24 @@ class Fanotify(mp.Process):
             self._exception(msg)
 
     def flush(self, do_non_mounts=True, do_mounts=True, do_fs=True) -> None:
+        """
+        To detail see **man fanotify_mark** for FAN_MARK_FLUSH
+
+        Remove either all marks for filesystems, all marks for
+        mounts, or all marks for directories and files from the
+        fanotify group.
+
+        :param do_non_mounts: Remove all marks for directories and files
+        :param do_mounts: Remove all marks for mounts
+        :param do_fs: Remove all marks for filesystems (since Linux 4.20)
+        """
+
         try:
             if do_non_mounts:
                 ext.mark(self._fd, FAN_MARK_FLUSH, 0, AT_FDCWD)
             if do_mounts:
                 ext.mark(self._fd, FAN_MARK_FLUSH | FAN_MARK_MOUNT, 0, AT_FDCWD)
-            if do_fs:
+            if do_fs and FAN_MARK_FILESYSTEM:   # Linux 4.20 and above
                 ext.mark(self._fd, FAN_MARK_FLUSH | FAN_MARK_FILESYSTEM, 0, AT_FDCWD)
         except OSError as e:
             msg = f'flush() error: {e}'
@@ -283,8 +355,21 @@ class Fanotify(mp.Process):
 
 
 class FanotifyData(dict):
+    """
+    Сontains fanotify event information
+    """
+
     def __init__(self, fd: int = -1, pid: int = 0, ev_types: int = 0,
                  exe: str = None, cwd: str = None, path: str = None):
+        """
+        :param fd: File descriptor if passed
+        :param pid: PID of caused process
+        :param ev_types: Event types of fanotify event
+        :param exe: EXE of the event caused process if passed
+        :param cwd: CWD of the event caused process if passed
+        :param path: PATH of the event caused file if passed
+        """
+
         super().__init__(fd=fd, pid=pid, ev_types=ev_types, exe=exe, cwd=cwd, path=path)
 
     def __getattr__(self, name: str) -> Any:
@@ -298,10 +383,21 @@ class FanotifyData(dict):
 
 
 class FanotifyClient:
+    """
+    Client for easy use and getting data via Fanotify.
+    """
+
     _PID_EVT_S = struct.Struct('=qQ')
     _P_SZ_S = struct.Struct('=I')
 
     def __init__(self, fanotify: Fanotify, **rkw) -> None:
+        """
+        :param fanotify: :class:`Fanotify` object to associate with it.
+        :param dict rkw: Keyword arguments for :class:`FanoRule`, excluding
+            :py:attr:`FanoRule.name` - this will be auto-generated and stored
+            to :py:attr:`FanotifyClient.rname`
+        """
+
         self.fanotify = fanotify
         self.rname = hashlib.sha256(rkw.pop('name', None) or os.urandom(32)).hexdigest().encode()
         self.rule = FanoRule(name=self.rname, **rkw)
@@ -312,10 +408,20 @@ class FanotifyClient:
         self.fanotify.connect(self.rule)
 
     def close(self) -> None:
+        """
+        Close the connection to the Fanotify object. The data will no
+        longer be received.
+        """
+
         self.fanotify.disconnect(self.rule)
         self.sock.close()
 
     def get_events(self) -> FanotifyData:
+        """
+        Receive fanotify events according to the established rules
+        for the current client.
+        """
+
         while 1:
             try:
                 data = self._recv_data()

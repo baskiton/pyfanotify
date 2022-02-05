@@ -177,16 +177,23 @@ rule_pids_check(struct c_rule *rule, pid_t pid)
 }
 
 PyDoc_STRVAR(FanoRule__doc__,
-"FanoRule(name, [pids, ev_types, exe_pattern, cwd_pattern, path_pattern, pass_fd]) -> FanoRule\n"
+"FanoRule(name, pids=(), ev_types=0, exe_pattern=None, cwd_pattern=None, path_pattern=None, pass_fd=False)\n"
+"\n"
+"Rule to receive events on it via fanotify. At least one rule parameter\n"
+"must be specified (other than the required `name` and optional `pass_fd`)\n"
 "\n"
 "Args:\n"
-"    name (str|bytes): Name of rule.\n"
-"    pids (list|tuple|set): PIDS.\n"
-"    ev_types (int): Event types mask.\n"
-"    exe_pattern (str): exe.\n"
-"    cwd_pattern (str): cwd.\n"
-"    path_pattern (str): path.\n"
-"    pass_fd (bool): Pass file descriptor.\n");
+"    name (AnyStr): Name of rule\n"
+"    pids (Iterable[Union[int, AnyStr]]): PIDS\n"
+"    ev_types (int): Event types mask\n"
+"    exe_pattern (AnyStr): exe\n"
+"    cwd_pattern (AnyStr): cwd\n"
+"    path_pattern (AnyStr): path\n"
+"    pass_fd (bool): Pass file descriptor\n"
+"\n"
+"Raises:\n"
+"    TypeError: if `pids` is not a set, list or tuple\n"
+"    ValueError: if no one rule parameter are specified\n");
 
 static int
 FanoRule_init(ext_FanoRule *self, PyObject *args, PyObject *kwargs)

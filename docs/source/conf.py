@@ -91,7 +91,6 @@ html_static_path = ['static']
 # -- Extension configuration -------------------------------------------------
 
 
-# autoclass_content = 'both'
 autodoc_default_options = {
     'members': True,
     'member_order': 'bysource',
@@ -99,5 +98,7 @@ autodoc_default_options = {
     'undoc-members': True,
 }
 
+#autoclass_content = 'both'
 autodoc_class_signature = 'separated'
 autodoc_preserve_defaults = True
+autodoc_typehints = 'description'

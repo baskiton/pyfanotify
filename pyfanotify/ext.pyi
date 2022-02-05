@@ -133,22 +133,22 @@ def run(fd: int, rcon: Connection, log_fd: int = None, fn: Callable = None, fn_a
 
 class FanoRule:
     """
-    Rule for fanotify
+    Rule to receive events on it via fanotify
 
     Attributes:
-        name (str|bytes): Name of rule
-        pids (list|tuple|set): PIDS
+        name (AnyStr): Name of rule
+        pids (Iterable[Union[int, AnyStr]]): PIDs
         ev_types (int): Event types mask
-        exe_pattern (str): exe
-        cwd_pattern (str): cwd
-        path_pattern (str): path
+        exe_pattern (str): EXE pattern
+        cwd_pattern (str): CWD pattern
+        path_pattern (str): PATH pattern
         pass_fd (bool): Pass file descriptor
     """
 
     def __init__(
             self,
             name: AnyStr,
-            pids: Iterable[Union[int, AnyStr]] = None,
+            pids: Iterable[Union[int, AnyStr]] = (),
             ev_types: int = 0,
             exe_pattern: AnyStr = None,
             cwd_pattern: AnyStr = None,
@@ -156,14 +156,21 @@ class FanoRule:
             pass_fd: bool = False
     ) -> None:
         """
+        At least one rule parameter must be specified
+        (other than the required `name` and optional `pass_fd`)
+
         Args:
-            name (str|bytes): Name of rule
-            pids (list|tuple|set): PIDS
+            name (Union[str, bytes]): Name of rule
+            pids (Optional[list, tuple, set]): PIDs
             ev_types (int): Event types mask
-            exe_pattern (str): exe
-            cwd_pattern (str): cwd
-            path_pattern (str): path
+            exe_pattern (str): EXE pattern
+            cwd_pattern (str): CWD pattern
+            path_pattern (str): PATH pattern
             pass_fd (bool): Pass file descriptor
+
+        Raises:
+            TypeError: if `pids` is not a set, list or tuple
+            ValueError: if no one rule parameter are specified
         """
         return
 
