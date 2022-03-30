@@ -1,4 +1,7 @@
-#define _GNU_SOURCE
+#ifndef _GNU_SOURCE
+# define _GNU_SOURCE
+#endif  // _GNU_SOURCE
+
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include <structmember.h>
@@ -787,7 +790,6 @@ PyInit_ext(void)
     PyModule_AddIntMacro(module, FAN_ONDIR);
     PyModule_AddIntMacro(module, FAN_EVENT_ON_CHILD);
     PyModule_AddIntMacro(module, FAN_CLOSE);
-    PyModule_AddIntMacro(module, FAN_MOVE);
     PyModule_AddIntMacro(module, FAN_CLOEXEC);
     PyModule_AddIntMacro(module, FAN_NONBLOCK);
     PyModule_AddIntMacro(module, FAN_CLASS_NOTIF);
@@ -802,7 +804,6 @@ PyInit_ext(void)
     PyModule_AddIntMacro(module, FAN_MARK_IGNORED_MASK);
     PyModule_AddIntMacro(module, FAN_MARK_IGNORED_SURV_MODIFY);
     PyModule_AddIntMacro(module, FAN_MARK_FLUSH);
-    PyModule_AddIntMacro(module, FAN_MARK_INODE);
     PyModule_AddIntMacro(module, FAN_MARK_MOUNT);
     PyModule_AddIntMacro(module, FANOTIFY_METADATA_VERSION);
     PyModule_AddIntMacro(module, FAN_ALLOW);
@@ -823,9 +824,11 @@ PyInit_ext(void)
 
 #ifdef FAN_REPORT_TID    // (Linux 4.20)
     PyModule_AddIntMacro(module, FAN_REPORT_TID);
+    PyModule_AddIntMacro(module, FAN_MARK_INODE);
     PyModule_AddIntMacro(module, FAN_MARK_FILESYSTEM);
 #else
     PyModule_AddIntConstant(module, "FAN_REPORT_TID", 0);
+    PyModule_AddIntConstant(module, "FAN_MARK_INODE", 0);
     PyModule_AddIntConstant(module, "FAN_MARK_FILESYSTEM", 0);
 #endif // FAN_REPORT_TID (Linux 4.20)
 
@@ -841,6 +844,7 @@ PyInit_ext(void)
     PyModule_AddIntMacro(module, FAN_ATTRIB);
     PyModule_AddIntMacro(module, FAN_MOVED_FROM);
     PyModule_AddIntMacro(module, FAN_MOVED_TO);
+    PyModule_AddIntMacro(module, FAN_MOVE);
     PyModule_AddIntMacro(module, FAN_CREATE);
     PyModule_AddIntMacro(module, FAN_DELETE);
     PyModule_AddIntMacro(module, FAN_DELETE_SELF);
@@ -850,6 +854,7 @@ PyInit_ext(void)
     PyModule_AddIntConstant(module, "FAN_ATTRIB", 0);
     PyModule_AddIntConstant(module, "FAN_MOVED_FROM", 0);
     PyModule_AddIntConstant(module, "FAN_MOVED_TO", 0);
+    PyModule_AddIntConstant(module, "FAN_MOVE", 0);
     PyModule_AddIntConstant(module, "FAN_CREATE", 0);
     PyModule_AddIntConstant(module, "FAN_DELETE", 0);
     PyModule_AddIntConstant(module, "FAN_DELETE_SELF", 0);

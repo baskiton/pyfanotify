@@ -24,6 +24,7 @@ def get_version():
 ext = Extension(
     'pyfanotify.ext',
     sources=['src/ext.c'],
+    extra_compile_args=['-std=c99'],
 )
 
 setup(

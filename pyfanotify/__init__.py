@@ -20,7 +20,7 @@ from . import ext
 
 FanoRule = ext.FanoRule
 
-__version__ = '0.1.2'
+__version__ = '0.1.3'
 
 # events
 FAN_ACCESS = ext.FAN_ACCESS
