@@ -35,6 +35,8 @@ PyDoc_STRVAR(ext__doc__,
 #define AGAIN (errno == EAGAIN || errno == EWOULDBLOCK)
 #endif
 
+#define O_FLAGS (O_RDONLY|O_LARGEFILE|O_CLOEXEC|O_NOATIME)
+
 typedef struct str_val {
     uint32_t len;
     char buf[PATH_MAX];
@@ -384,6 +386,7 @@ do_write(int fd, const void *data, size_t len)
     do {
         ret = write(fd, data, len);
     } while (ret < 0 && errno == EINTR);
+    fsync(fd);
     return ret;
 }
 
@@ -474,7 +477,7 @@ get_proc_str(const char *fmt, int meta, char *buf, size_t buf_size)
 
 #define FIND_RULE_CHECK_MATCH(name, fmt, meta) ({           \
         if (rule->name##_pattern.len) {                     \
-            if (!(name).buf[0] &&                           \
+            if (!((name).buf[0]) &&                         \
                 !((name).len = get_proc_str(fmt, ev->meta,  \
                         (name).buf, sizeof((name).buf))))   \
                 goto rules_cycle_continue;                  \
@@ -487,30 +490,110 @@ get_proc_str(const char *fmt, int meta, char *buf, size_t buf_size)
 static int
 handle_events(int fd, struct c_rule **rules, int sk_fd, int log_fd)
 {
-    const struct fanotify_event_metadata *ev;
-    struct fanotify_event_metadata buf[8192];
+    uint8_t buf[8192];
+    struct fanotify_event_metadata *ev = (void *)buf;
     ssize_t len;
     str_val_t exe, cwd, path, evt;
+    int sk_res;
+
+    struct fanotify_event_info_header *finfo;
+    struct fanotify_event_info_fid *fid;
+//    struct fanotify_event_info_pidfd *pidfd;
+//    struct fanotify_event_info_error *ierror;
+    struct file_handle *file_handle;
+    const char *file_name;
+    ssize_t info_len;
 
     if ((len = read(fd, buf, sizeof(buf))) == -1)
         return errno;
 
-    ev = buf;
     while (FAN_EVENT_OK(ev, len)) {
-        exe.buf[0] = cwd.buf[0] = path.buf[0] = evt.buf[0] = '\0';
-        exe.len = cwd.len = path.len = evt.len = 0;
         if (ev->vers != FANOTIFY_METADATA_VERSION)
             return -101;
-#ifdef FANO_PERM
-        unsigned char pass_fd = 0;
-        unsigned int resp = FAN_ALLOW;
-#endif // FANO_PERM
-        int sk_res;
+
+        exe.buf[0] = cwd.buf[0] = path.buf[0] = evt.buf[0] = '\0';
+        exe.len = cwd.len = path.len = evt.len = 0;
+
+        if (ev->event_len != FAN_EVENT_METADATA_LEN) {
+            info_len = ev->event_len - ev->metadata_len;
+            ssize_t rest = info_len;
+            int ffd = FAN_NOFD, dfd = FAN_NOFD, *_fd = NULL;
+            finfo = (struct fanotify_event_info_header *)(ev + 1);
+            file_name = NULL;
+            file_handle = NULL;
+
+            while (rest) {
+                switch (finfo->info_type) {
+                case FAN_EVENT_INFO_TYPE_FID:
+                case FAN_EVENT_INFO_TYPE_DFID:
+                case FAN_EVENT_INFO_TYPE_DFID_NAME:
+                    fid = (struct fanotify_event_info_fid *)finfo;
+                    file_handle = (struct file_handle *)fid->handle;
+                    break;
+                case FAN_EVENT_INFO_TYPE_PIDFD:
+//                    pidfd = (struct fanotify_event_info_pidfd *)finfo;
+//                    break;
+                case FAN_EVENT_INFO_TYPE_ERROR:
+//                    ierror = (struct fanotify_event_info_error *)finfo;
+//                    break;
+                default:
+//                    do_log(log_fd, "Fanotify: invalid info_type: %d\n\n", finfo->info_type);
+                    close(ffd);
+                    close(dfd);
+                    goto evt_end;
+                }
+                if (finfo->info_type == FAN_EVENT_INFO_TYPE_DFID_NAME)
+                    file_name = (char *)(file_handle->f_handle + file_handle->handle_bytes);
+
+                if (ev->mask & (FAN_CREATE|FAN_DELETE|FAN_MOVE))
+                    _fd = &dfd;
+                else if (finfo->info_type == FAN_EVENT_INFO_TYPE_FID)
+                    _fd = &ffd;
+                else
+                    _fd = &dfd;
+
+                if (file_handle) {
+                    int evt_fd = open_by_handle_at(AT_FDCWD, file_handle, O_FLAGS);
+                    if ((evt_fd == FAN_NOFD) && (errno == ESTALE))
+                        goto info_next;
+                    close(*_fd);
+                    *_fd = evt_fd;
+                }
+            info_next:
+                rest -= finfo->len;
+                finfo = (struct fanotify_event_info_header *)((uint8_t *)finfo + finfo->len);
+            }
+
+            if (ffd != FAN_NOFD) {
+                ev->fd = ffd;
+                close(dfd);
+                dfd = -1;
+            } else if (dfd != FAN_NOFD) {
+                if (file_name && !(ev->mask & (FAN_CREATE|FAN_DELETE|FAN_MOVE))) {
+                    ev->fd = openat(dfd, file_name, O_FLAGS);
+                    if (ev->fd == FAN_NOFD)
+                        ev->fd = dfd;
+                    else {
+                        close(dfd);
+                        dfd = FAN_NOFD;
+                    }
+                } else
+                    ev->fd = dfd;
+                if (file_name && ev->fd == dfd) {
+                    path.len = get_proc_str("/proc/self/fd/%d", dfd, path.buf, sizeof(path.buf));
+                    path.buf[path.len] = '/';
+                    path.len = stpncpy(path.buf + path.len + 1, file_name, sizeof(path.buf) - path.len - 1) - path.buf;
+                }
+            } else
+                goto evt_end;
+        }
+
         for (struct c_rule *rule = *rules; rule;) {
             if (rule_pids_check(rule, ev->pid))
                 goto rules_cycle_continue;
             if (rule->ev_types && !(rule->ev_types & ev->mask))
                 goto rules_cycle_continue;
+
             FIND_RULE_CHECK_MATCH(exe, "/proc/%d/exe", pid);
             FIND_RULE_CHECK_MATCH(cwd, "/proc/%d/cwd", pid);
             FIND_RULE_CHECK_MATCH(path, "/proc/self/fd/%d", fd);
@@ -526,22 +609,14 @@ handle_events(int fd, struct c_rule **rules, int sk_fd, int log_fd)
                     continue;
                 }
             }
-#ifdef FANO_PERM
-            else
-                pass_fd |= rule->pass_fd;
-#endif // FANO_PERM
-            rules_cycle_continue:
+
+        rules_cycle_continue:
             rule = rule->next;
         }
-        if (ev->fd != FAN_NOFD) {
-#ifdef FANO_PERM
-            if ((ev->mask & (FAN_OPEN_PERM|FAN_ACCESS_PERM)) && !pass_fd) {
-                struct fanotify_response r = {ev->fd, resp};
-                do_write(fd, &r, sizeof(r));
-            }
-#endif // FANO_PERM
-            close(ev->fd);
-        }
+
+    evt_end:
+        close(ev->fd);
+
         ev = FAN_EVENT_NEXT(ev, len);
     }
     return 0;
@@ -811,6 +886,7 @@ PyInit_ext(void)
     PyModule_AddIntMacro(module, FAN_AUDIT);
     PyModule_AddIntMacro(module, FAN_NOFD);
 
+    PyModule_AddIntMacro(module, O_CLOEXEC);
     PyModule_AddIntMacro(module, AT_FDCWD);
     PyModule_AddIntMacro(module, CMD_STOP);
     PyModule_AddIntMacro(module, CMD_CONNECT);
@@ -871,6 +947,12 @@ PyInit_ext(void)
     PyModule_AddIntConstant(module, "FAN_REPORT_NAME", 0);
     PyModule_AddIntConstant(module, "FAN_REPORT_DFID_NAME", 0);
 #endif // FAN_REPORT_DIR_FID (Linux 5.9)
+
+#ifdef FAN_RENAME   // (Linux 5.17)
+    PyModule_AddIntMacro(module, FAN_RENAME);
+#else
+    PyModule_AddIntConstant(module, "FAN_RENAME", 0);
+#endif
 
     return module;
 }

@@ -66,7 +66,8 @@ if __name__ == '__main__':
         while poll.poll():
             x = {}
             for i in cli.get_events():
-                x[i.path] = i
+                i.ev_types = fan.evt_to_str(i.ev_types)
+                x.setdefault(i.path, []).append(i)
             if x:
                 print(x)
     except:

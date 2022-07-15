@@ -20,7 +20,7 @@ from . import ext
 
 FanoRule = ext.FanoRule
 
-__version__ = '0.1.3'
+__version__ = '0.2.0'
 
 # events
 FAN_ACCESS = ext.FAN_ACCESS
@@ -43,6 +43,8 @@ FAN_OPEN_PERM = ext.FAN_OPEN_PERM
 FAN_ACCESS_PERM = ext.FAN_ACCESS_PERM
 FAN_OPEN_EXEC_PERM = ext.FAN_OPEN_EXEC_PERM  # since Linux 5.0
 
+FAN_RENAME = ext.FAN_RENAME     # since Linux 5.17
+
 FAN_ONDIR = ext.FAN_ONDIR
 
 FAN_EVENT_ON_CHILD = ext.FAN_EVENT_ON_CHILD
@@ -50,9 +52,10 @@ FAN_EVENT_ON_CHILD = ext.FAN_EVENT_ON_CHILD
 FAN_CLOSE = FAN_CLOSE_WRITE | FAN_CLOSE_NOWRITE
 FAN_MOVE = FAN_MOVED_FROM | FAN_MOVED_TO
 
-FAN_ALL_EVENTS = FAN_ACCESS | FAN_MODIFY | FAN_OPEN | FAN_OPEN_EXEC | FAN_ONDIR | FAN_EVENT_ON_CHILD | FAN_CLOSE
+FAN_ALL_EVENTS = FAN_ACCESS | FAN_MODIFY | FAN_OPEN | FAN_OPEN_EXEC | FAN_CLOSE | FAN_ONDIR | FAN_EVENT_ON_CHILD
 FAN_ALL_PERM_EVENTS = FAN_OPEN_PERM | FAN_ACCESS_PERM | FAN_OPEN_EXEC_PERM
-FAN_ALL_FID_EVENTS = FAN_MOVED_FROM | FAN_MOVED_TO | FAN_CREATE | FAN_DELETE | FAN_DELETE_SELF | FAN_MOVE_SELF
+FAN_ALL_FID_EVENTS = (FAN_ATTRIB | FAN_MOVE | FAN_CREATE | FAN_DELETE | FAN_DELETE_SELF
+                      | FAN_MOVE_SELF | FAN_RENAME | FAN_ONDIR | FAN_EVENT_ON_CHILD)
 
 # flags for init()
 FAN_CLOEXEC = ext.FAN_CLOEXEC
@@ -100,12 +103,36 @@ FAN_NOFD = ext.FAN_NOFD     # No fd set in event
 AT_FDCWD = ext.AT_FDCWD
 
 _INIT_FLAGS = FAN_CLOEXEC | FAN_NONBLOCK | FAN_UNLIMITED_QUEUE | FAN_UNLIMITED_MARKS | FAN_CLASS_CONTENT
-_INIT_FID_FLAGS = FAN_REPORT_FID | FAN_REPORT_DIR_FID
-_INIT_O_FLAGS = os.O_RDONLY | (os.O_LARGEFILE or 0o100000) | getattr(os, 'O_CLOEXEC', 0o2000000) | os.O_NOATIME
+_INIT_FID_FLAGS = FAN_REPORT_FID | FAN_REPORT_DFID_NAME
+_INIT_O_FLAGS = os.O_RDONLY | os.O_LARGEFILE | ext.O_CLOEXEC | os.O_NOATIME
 
 _CMD_STOP = ext.CMD_STOP
 _CMD_CONNECT = ext.CMD_CONNECT
 _CMD_DISCONNECT = ext.CMD_DISCONNECT
+
+_EVT_MASKS = {
+    FAN_ACCESS: 'access',
+    FAN_MODIFY: 'modify',
+    FAN_ATTRIB: 'attrib',
+    FAN_CLOSE_WRITE: 'close_write',
+    FAN_CLOSE_NOWRITE: 'close_nowrite',
+    FAN_OPEN: 'open',
+    FAN_MOVED_FROM: 'moved_from',
+    FAN_MOVED_TO: 'moved_to',
+    FAN_CREATE: 'create',
+    FAN_DELETE: 'delete',
+    FAN_DELETE_SELF: 'delete_self',
+    FAN_MOVE_SELF: 'move_self',
+    FAN_OPEN_EXEC: 'open_exec',
+    FAN_OPEN_PERM: 'open_perm',
+    FAN_ACCESS_PERM: 'access_perm',
+    FAN_OPEN_EXEC_PERM: 'open_exec_perm',
+    FAN_RENAME: 'rename',
+    FAN_ONDIR: 'ondir',
+    FAN_EVENT_ON_CHILD: 'on_child',
+
+    0: ''
+}
 
 
 class Fanotify(mp.Process):
@@ -116,7 +143,8 @@ class Fanotify(mp.Process):
     def __init__(self, init_fid: bool = False, log: logging.Logger = None,
                  fn: Callable = None, fn_args: Tuple = (), fn_timeout: int = 0):
         """
-        :param init_fid: See **man fanotify_init** for FAN_REPORT_FID
+        :param init_fid: Enable filesystem events to watch (FAN_CREATE, FAN_DELETE, FAN_MOVE, FAN_ATTRIB).
+            See **man fanotify_init** for FAN_REPORT_FID
             and FAN_REPORT_DIR_FID
         :param log: Logger
         :param fn: Function that will be called after the specified `fn_timeout`
@@ -129,6 +157,7 @@ class Fanotify(mp.Process):
         """
 
         super().__init__(name='Fanotify')
+        self._with_fid = init_fid
         self._log = log
 
         try:
@@ -139,15 +168,18 @@ class Fanotify(mp.Process):
                     self._exception('No fanotify!')
                     e.strerror += ': No fanotify!'
                 else:
-                    self._exception(f'Fanotify init error: {e}')
+                    self._exception(f'Fanotify init: {e}')
                 raise
+
         flags = _INIT_FLAGS
         if init_fid:
+            flags &= ~FAN_CLASS_CONTENT
             flags |= _INIT_FID_FLAGS
+
         try:
             self._fd = ext.init(flags, _INIT_O_FLAGS)
         except OSError as e:
-            e.strerror = f'Fanotify init error: {e.strerror}'
+            e.strerror = f'Fanotify init: {e.strerror}'
             self._exception(f'{e}')
             raise
 
@@ -164,6 +196,10 @@ class Fanotify(mp.Process):
         self._fn_timeout = int(fn_timeout)
 
         atexit.register(lambda x: (x.stop(), x.join()), self)
+
+    @property
+    def with_fid(self) -> bool:
+        return self._with_fid
 
     def start(self) -> None:
         """
@@ -214,68 +250,75 @@ class Fanotify(mp.Process):
         self._wr.send((_CMD_DISCONNECT, rule))
 
     def mark(self, path: Union[str, Iterable], ev_types: int = FAN_ALL_EVENTS,
-             is_type: str = '', dont_follow: bool = False) -> None:
+             is_type: str = '', dont_follow: bool = False,
+             as_ignore: bool = False, remove: bool = False) -> None:
         """
         To detail see **man fanotify_mark**
 
-        The events in `ev_types` will be added to the mark mask (or to
-        the ignore mask). `ev_types` must be nonempty
+        Adds, removes, or modifies an fanotify mark on a
+        filesystem object. The caller must have read permission on the
+        filesystem object that is to be marked.
+        `ev_types` must be nonempty
 
         :param path: path to be marked
         :param ev_types: defines which events shall be listened for (or which
             shall be ignored). It is a bit mask composed values. See man
         :param is_type: type of `path`. It can be:
 
-            - ``'mp'`` - is mountpoint
-            - ``'fs'`` - is file system
+            - ``'mp'`` - is mount point
+            - ``'fs'`` - is filesystem
             - ``'dir'`` - is directory
 
         :param dont_follow: if `path` is a symbolic link, mark the link itself,
             rather than the file to which it refers.
+        :param as_ignore: if `True` add/remove to/from ignore mask.
+        :param remove: if `True`, events in `ev_types` will be removed from
+            the mark mask (or from ignore mask);
+            else events will be added to the mark mask (or to ignore mask).
         """
 
+        if ev_types & (FAN_OPEN_PERM | FAN_ACCESS_PERM | FAN_OPEN_EXEC_PERM):
+            msg = 'PERM events are not supported yet'
+            self._error(msg)
+            raise NotImplementedError(msg)
+
         if isinstance(path, str):
-            flags = FAN_MARK_ADD
+            flags = (remove and FAN_MARK_REMOVE) or FAN_MARK_ADD
+
             if is_type == 'mp':
                 flags |= FAN_MARK_MOUNT
             elif is_type == 'fs':
                 flags |= FAN_MARK_FILESYSTEM
             elif is_type == 'dir':
                 flags |= FAN_MARK_ONLYDIR
+
             if dont_follow:
                 flags |= FAN_MARK_DONT_FOLLOW
+
+            if as_ignore:
+                flags |= FAN_MARK_IGNORED_MASK | FAN_MARK_IGNORED_SURV_MODIFY
 
             try:
                 ext.mark(self._fd, flags, ev_types, AT_FDCWD, path)
                 # self._debug(f'{path} is marked')
             except OSError as e:
-                msg = f'mark() error: {e}'
+                msg = f'mark(): {e}'
                 if e.errno == errno.EBADF:
                     msg += f': fd={self._fd} is not an fanotify descriptor'
                 elif e.errno == errno.EINVAL:
-                    msg += f': invalid evt_types or fd={self._fd} is not an fanotify descriptor'
-                self._exception(msg)
+                    if self.with_fid and (ev_types & (FAN_OPEN_PERM | FAN_ACCESS_PERM | FAN_OPEN_EXEC_PERM)):
+                        msg += ': PERM events are not allowed with FID report'
+                    elif ev_types & FAN_ALL_FID_EVENTS:
+                        if not self.with_fid:
+                            msg += ': Filesystem events required an fanotify FID group (init_fid=True when init)'
+                        elif flags & FAN_MARK_MOUNT:
+                            msg += ': Filesystem events not supported with mount point'
+                    else:
+                        msg += f': invalid evt_types or fd={self._fd} is not an fanotify descriptor'
+                self._error(msg)
         elif isinstance(path, Iterable):
             for p in path:
                 self.mark(p, ev_types, is_type, dont_follow)
-
-    def unmark(self, ev_types: int = FAN_ALL_EVENTS) -> None:
-        """
-        To detail see **man fanotify_mark**
-
-        The events in `ev_types` will be removed from the mark
-        mask (or from the ignore mask). `ev_types` must be nonempty
-
-        :param ev_types: same as in :meth:`Fanotify.mark`
-        """
-
-        try:
-            ext.mark(self._fd, FAN_MARK_REMOVE, ev_types, AT_FDCWD)
-        except OSError as e:
-            msg = f'unmark() error: {e}'
-            if e.errno == errno.EBADF:
-                msg += f': fd={self._fd} is not an fanotify descriptor'
-            self._exception(msg)
 
     def flush(self, do_non_mounts=True, do_mounts=True, do_fs=True) -> None:
         """
@@ -298,7 +341,7 @@ class Fanotify(mp.Process):
             if do_fs and FAN_MARK_FILESYSTEM:   # Linux 4.20 and above
                 ext.mark(self._fd, FAN_MARK_FLUSH | FAN_MARK_FILESYSTEM, 0, AT_FDCWD)
         except OSError as e:
-            msg = f'flush() error: {e}'
+            msg = f'flush(): {e}'
             if e.errno == errno.EBADF:
                 msg += f': fd={self._fd} is not an fanotify descriptor'
             self._exception(msg)
@@ -310,7 +353,7 @@ class Fanotify(mp.Process):
         self._rd.close()
 
     def _action(self) -> None:
-        ext.run(self._fd, self._rd, -1, self._fn, self._fn_args, self._fn_timeout)
+        ext.run(self._fd, self._rd, sys.stdout.fileno(), self._fn, self._fn_args, self._fn_timeout)
 
     def _debug(self, *args, **kwargs) -> None:
         if self._log:
@@ -349,14 +392,14 @@ class Fanotify(mp.Process):
             self._do_log('EXCEPTION', *args, **kwargs)
 
     def _do_log(self, lvl: str, msg: str, *args, **kwargs) -> None:
-        x = sys.stderr if (lvl in ('DEBUG', 'INFO')) else sys.stdout
+        x = sys.stdout if (lvl in ('DEBUG', 'INFO')) else sys.stderr
         x.write(f'{datetime.datetime.now()} {lvl}: Fanotify: {msg % args}\n')
         x.flush()
 
 
 class FanotifyData(dict):
     """
-    Сontains fanotify event information
+    Contains fanotify event information
     """
 
     def __init__(self, fd: int = -1, pid: int = 0, ev_types: int = 0,
@@ -449,3 +492,7 @@ class FanotifyClient:
             res[i] = msg[off:off + sz]
             off += sz
         return res
+
+
+def evt_to_str(evt: int):
+    return '|'.join(v for k, v in _EVT_MASKS.items() if k & evt)

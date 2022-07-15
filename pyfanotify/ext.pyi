@@ -22,6 +22,8 @@ FAN_OPEN_PERM: int
 FAN_ACCESS_PERM: int
 FAN_OPEN_EXEC_PERM: int # since Linux 5.0
 
+FAN_RENAME: int # since Linux 5.17
+
 FAN_ONDIR: int
 
 FAN_EVENT_ON_CHILD: int
@@ -73,6 +75,7 @@ FAN_AUDIT: int
 
 FAN_NOFD: int   # No fd set in event
 AT_FDCWD: int
+O_CLOEXEC: int
 
 CMD_STOP: int
 CMD_CONNECT: int

@@ -3,17 +3,12 @@ import select
 import pyfanotify as fan
 
 
-def foo(t):
-    print(f'calling `foo` every {t} seconds')
-
-
 if __name__ == '__main__':
-    foo_timeout = 1
-    fanot = fan.Fanotify(fn=foo, fn_args=(foo_timeout,), fn_timeout=foo_timeout)
-    fanot.mark('/home', is_type='mp')
+    fanot = fan.Fanotify(init_fid=True)
+    fanot.mark('/home', is_type='fs', ev_types=fan.FAN_ALL_FID_EVENTS)
     fanot.start()
 
-    cli = fan.FanotifyClient(fanot, path_pattern='/home/*')
+    cli = fan.FanotifyClient(fanot, path_pattern='*')
     poll = select.poll()
     poll.register(cli.sock.fileno(), select.POLLIN)
     try:
