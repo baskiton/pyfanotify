@@ -514,6 +514,7 @@ handle_events(int fd, struct c_rule **rules, int sk_fd, int log_fd)
         exe.buf[0] = cwd.buf[0] = path.buf[0] = evt.buf[0] = '\0';
         exe.len = cwd.len = path.len = evt.len = 0;
 
+#ifdef FAN_REPORT_FID
         if (ev->event_len != FAN_EVENT_METADATA_LEN) {
             info_len = ev->event_len - ev->metadata_len;
             ssize_t rest = info_len;
@@ -525,15 +526,17 @@ handle_events(int fd, struct c_rule **rules, int sk_fd, int log_fd)
             while (rest) {
                 switch (finfo->info_type) {
                 case FAN_EVENT_INFO_TYPE_FID:
+# ifdef FAN_REPORT_DIR_FID
                 case FAN_EVENT_INFO_TYPE_DFID:
                 case FAN_EVENT_INFO_TYPE_DFID_NAME:
+# endif // FAN_REPORT_DIR_FID
                     fid = (struct fanotify_event_info_fid *)finfo;
                     file_handle = (struct file_handle *)fid->handle;
                     break;
-                case FAN_EVENT_INFO_TYPE_PIDFD:
+//                case FAN_EVENT_INFO_TYPE_PIDFD:
 //                    pidfd = (struct fanotify_event_info_pidfd *)finfo;
 //                    break;
-                case FAN_EVENT_INFO_TYPE_ERROR:
+//                case FAN_EVENT_INFO_TYPE_ERROR:
 //                    ierror = (struct fanotify_event_info_error *)finfo;
 //                    break;
                 default:
@@ -542,8 +545,10 @@ handle_events(int fd, struct c_rule **rules, int sk_fd, int log_fd)
                     close(dfd);
                     goto evt_end;
                 }
+# ifdef FAN_REPORT_DIR_FID
                 if (finfo->info_type == FAN_EVENT_INFO_TYPE_DFID_NAME)
                     file_name = (char *)(file_handle->f_handle + file_handle->handle_bytes);
+# endif // FAN_REPORT_DIR_FID
 
                 if (ev->mask & (FAN_CREATE|FAN_DELETE|FAN_MOVE))
                     _fd = &dfd;
@@ -587,6 +592,7 @@ handle_events(int fd, struct c_rule **rules, int sk_fd, int log_fd)
             } else
                 goto evt_end;
         }
+#endif // FAN_REPORT_FID
 
         for (struct c_rule *rule = *rules; rule;) {
             if (rule_pids_check(rule, ev->pid))
