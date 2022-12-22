@@ -3,8 +3,8 @@
 [![PyPI - Downloads](https://img.shields.io/pypi/dm/pyfanotify?logo=python&logoColor=white)][pypi_proj]
 [![PyPI - License](https://img.shields.io/pypi/l/pyfanotify?logo=open-source-initiative&logoColor=white)](https://github.com/baskiton/pyfanotify/blob/main/LICENSE)
 
-[![build](https://img.shields.io/github/workflow/status/baskiton/pyfanotify/build?logo=github)](https://github.com/baskiton/pyfanotify/actions/workflows/build.yml)
-[![upload](https://img.shields.io/github/workflow/status/baskiton/pyfanotify/upload?label=upload&logo=github)](https://github.com/baskiton/pyfanotify/actions/workflows/pypi-upload.yml)
+[![build](https://img.shields.io/github/actions/workflow/status/baskiton/pyfanotify/build.yml?logo=github)](https://github.com/baskiton/pyfanotify/actions/workflows/build.yml)
+[![upload](https://img.shields.io/github/actions/workflow/status/baskiton/pyfanotify/pypi-upload.yml?label=upload&logo=github)](https://github.com/baskiton/pyfanotify/actions/workflows/pypi-upload.yml)
 [![docs](https://img.shields.io/readthedocs/pyfanotify?logo=readthedocs&logoColor=white)][documentation]
 
 Python wrapper for Linux fanotify. \
