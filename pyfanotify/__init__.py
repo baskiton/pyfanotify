@@ -159,9 +159,10 @@ class Fanotify(mp.Process):
         super().__init__(name='Fanotify')
         self._with_fid = init_fid
         self._log = log
+        self._ctx = ext.create()
 
         try:
-            ext.mark(FAN_NOFD, FAN_MARK_ADD, FAN_MODIFY | FAN_CLOSE_WRITE | FAN_EVENT_ON_CHILD, AT_FDCWD, '')
+            ext.mark(self._ctx, FAN_MARK_ADD, FAN_MODIFY | FAN_CLOSE_WRITE | FAN_EVENT_ON_CHILD, AT_FDCWD, '')
         except OSError as e:
             if e.errno != errno.EBADF:
                 if e.errno == errno.ENOSYS:
@@ -177,7 +178,7 @@ class Fanotify(mp.Process):
             flags |= _INIT_FID_FLAGS
 
         try:
-            self._fd = ext.init(flags, _INIT_O_FLAGS)
+            self._fd = ext.init(self._ctx, flags, _INIT_O_FLAGS)
         except OSError as e:
             e.strerror = f'Fanotify init: {e.strerror}'
             self._exception(f'{e}')
@@ -208,6 +209,8 @@ class Fanotify(mp.Process):
             self._is_ready = False
             super(Fanotify, self).start()
             atexit.register(lambda x: (x.stop(), x.join()), self)
+            self._rd.close()
+            self._rd = None
 
     def run(self) -> None:
         self._debug('start')
@@ -225,10 +228,14 @@ class Fanotify(mp.Process):
         """
 
         if self._wr:
-            self._wr.send((_CMD_STOP,))
+            wr = self._wr
+            self._wr = None
+            wr.send((_CMD_STOP,))
+            wr.close()
         self.join()
-        self._fd = FAN_NOFD
-        self._wr = self._rd = None
+        if self._fd != FAN_NOFD:
+            os.close(self._fd)
+            self._fd = FAN_NOFD
 
     def connect(self, rule: FanoRule) -> None:
         """
@@ -298,7 +305,7 @@ class Fanotify(mp.Process):
                 flags |= FAN_MARK_IGNORED_MASK | FAN_MARK_IGNORED_SURV_MODIFY
 
             try:
-                ext.mark(self._fd, flags, ev_types, AT_FDCWD, path)
+                ext.mark(self._ctx, flags, ev_types, AT_FDCWD, path)
                 # self._debug(f'{path} is marked')
             except OSError as e:
                 msg = f'mark(): {e}'
@@ -334,11 +341,11 @@ class Fanotify(mp.Process):
 
         try:
             if do_non_mounts:
-                ext.mark(self._fd, FAN_MARK_FLUSH, 0, AT_FDCWD)
+                ext.mark(self._ctx, FAN_MARK_FLUSH, 0, AT_FDCWD)
             if do_mounts:
-                ext.mark(self._fd, FAN_MARK_FLUSH | FAN_MARK_MOUNT, 0, AT_FDCWD)
+                ext.mark(self._ctx, FAN_MARK_FLUSH | FAN_MARK_MOUNT, 0, AT_FDCWD)
             if do_fs and FAN_MARK_FILESYSTEM:   # Linux 4.20 and above
-                ext.mark(self._fd, FAN_MARK_FLUSH | FAN_MARK_FILESYSTEM, 0, AT_FDCWD)
+                ext.mark(self._ctx, FAN_MARK_FLUSH | FAN_MARK_FILESYSTEM, 0, AT_FDCWD)
         except OSError as e:
             msg = f'flush(): {e}'
             if e.errno == errno.EBADF:
@@ -346,13 +353,13 @@ class Fanotify(mp.Process):
             self._exception(msg)
 
     def _close(self) -> None:
-        self.flush()
-        os.close(self._fd)
-        self._wr.close()
         self._rd.close()
+        self._rd = None
 
     def _action(self) -> None:
-        ext.run(self._fd, self._pid, self._rd, sys.stdout.fileno(), self._fn, self._fn_args, self._fn_timeout)
+        self._wr.close()
+        self._wr = None
+        ext.run(self._ctx, self._rd, sys.stdout.fileno(), self._fn, self._fn_args, self._fn_timeout)
 
     def _debug(self, *args, **kwargs) -> None:
         if self._log:

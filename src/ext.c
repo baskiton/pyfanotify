@@ -16,6 +16,7 @@
 #include <sys/fanotify.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/vfs.h>
 #include <unistd.h>
 
 
@@ -44,6 +45,7 @@ enum RUN_ERR_CODE {
 };
 
 typedef struct c_rule c_rule_t;
+typedef struct _fs_list fs_list_t;
 
 typedef struct {
     pid_t pid;
@@ -52,6 +54,7 @@ typedef struct {
 
 typedef struct {
     c_rule_t *rules;
+    fs_list_t *fs_list;
     pid_cache_t *cache_idx;
     pid_cache_t pid_cache[PID_CACHE_SIZE];
     long main_pid;
@@ -73,6 +76,7 @@ typedef struct {
 
 #define BUFFER_INIT { .bufsz = 512 }
 
+// ### FMonRule ###############################################################
 struct c_rule {
     c_rule_t *next;
     ssize_t hash;
@@ -342,9 +346,110 @@ static PyTypeObject ext_FanoRuleType = {
     .tp_members = FanoRule_members,
     .tp_methods = FanoRule_methods,
 };
+// ### ! FMonRule #############################################################
+
+// ### FMonRule ###############################################################
+struct _fs_list {
+    fs_list_t *next;
+    char *path;
+    fsid_t fsid;
+    int fd;
+};
+
+static void
+fs_list_add(fs_list_t **list, const char *path)
+{
+    while (*list) {
+        if (!strcmp((*list)->path, path))
+            // already exist
+            return;
+        list = &(*list)->next;
+    }
+
+    struct statfs buf;
+    if (statfs(path, &buf))
+        return;
+
+    fs_list_t *new = PyMem_Malloc(sizeof(*new));
+    if (!new || !(new->path = PyMem_Malloc(strlen(path) + 1))) {
+        PyMem_Free(new);
+        return;
+    }
+
+    new->next = NULL;
+    new->fd = open(path, O_RDONLY | O_DIRECTORY);
+    strcpy(new->path, path);
+    memcpy(&new->fsid, &buf.f_fsid, sizeof(new->fsid));
+
+    *list = new;
+}
+
+static void
+fs_list_del(fs_list_t **list, const char *path)
+{
+    while (*list) {
+        if (!strcmp((*list)->path, path)) {
+            fs_list_t *next = (*list)->next;
+            close((*list)->fd);
+            PyMem_Free((*list)->path);
+            PyMem_Free((*list));
+            *list = next;
+            return;
+        }
+        list = &(*list)->next;
+    }
+}
+
+static void
+fs_list_clear(fs_list_t **list)
+{
+    fs_list_t *item = *list;
+    while (item) {
+        fs_list_t *next = item->next;
+        close(item->fd);
+        PyMem_Free(item->path);
+        PyMem_Free(item);
+        item = next;
+    }
+    *list = 0;
+}
+
+static fs_list_t *
+fs_list_get_fs(fs_list_t **list, fsid_t *fsid)
+{
+    while (*list) {
+        if (!memcmp(&(*list)->fsid, fsid, sizeof(*fsid)))
+            return *list;
+        list = &(*list)->next;
+    }
+    return NULL;
+}
+// ### ! FMonRule #############################################################
+
+PyDoc_STRVAR(create__doc__,
+"create() -> int\n"
+"\n"
+"Create fanotify context\n"
+"\n"
+"Raises:\n"
+"    OSError\n");
+
+static PyObject *
+pyfanotify_create(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    fano_ctx_t *ctx = calloc(1, sizeof(*ctx));
+    if (!ctx)
+        return PyErr_SetFromErrno(PyExc_OSError);
+
+    ctx->fano_fd = ctx->log_fd = ctx->sock_fd = -1;
+    ctx->cache_idx = ctx->pid_cache;
+    ctx->main_pid = getpid();
+
+    return PyLong_FromVoidPtr(ctx);
+}
 
 PyDoc_STRVAR(init__doc__,
-"init(flags: int, o_flags: int) -> int\n"
+"init(ctx: int, flags: int, o_flags: int) -> int\n"
 "\n"
 "Wrapper for fanotify_init\n"
 "\n"
@@ -360,22 +465,29 @@ PyDoc_STRVAR(init__doc__,
 static PyObject *
 pyfanotify_init(PyObject *self, PyObject *args, PyObject *kwargs)
 {
-    static char *kwlist[] = {"flags", "o_flags", NULL};
+    static char *kwlist[] = {"ctx", "flags", "o_flags", NULL};
+    long long ctx_ptr;
     unsigned int flags, o_flags = 0;
+    fano_ctx_t *ctx;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "II:init", kwlist,
-                                     &flags, &o_flags))
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "LII:init", kwlist,
+                                     &ctx_ptr, &flags, &o_flags))
         return NULL;
 
-    int fd = fanotify_init(flags, o_flags);
-    if (fd == -1)
+    if (!(ctx = (void *)ctx_ptr)) {
+        PyErr_SetString(PyExc_ValueError, "Invalid context");
+        return NULL;
+    }
+
+    ctx->fano_fd = fanotify_init(flags, o_flags);
+    if (ctx->fano_fd == -1)
         return PyErr_SetFromErrno(PyExc_OSError);
 
-    return PyLong_FromLong(fd);
+    return PyLong_FromLong(ctx->fano_fd);
 }
 
 PyDoc_STRVAR(mark__doc__,
-"mark(fd: int, flags: int, mask: int, dirfd: int, pathname: str = None) -> None\n"
+"mark(ctx: int, flags: int, mask: int, dirfd: int, pathname: str = None) -> None\n"
 "\n"
 "Wrapper for fanotify_mark\n"
 "\n"
@@ -388,23 +500,36 @@ PyDoc_STRVAR(mark__doc__,
 static PyObject *
 pyfanotify_mark(PyObject *self, PyObject *args, PyObject *kwargs)
 {
-    static char *kwlist[] = {"fd", "flags", "mask", "dirfd", "pathname", NULL};
-    int fanotify_fd = -1;
+    static char *kwlist[] = {"ctx", "flags", "mask", "dirfd", "pathname", NULL};
+    long long ctx_ptr;
     unsigned int flags = 0;
     uint64_t mask = 0;
     int dirfd = -1;
     const char *pathname = NULL;
+    fano_ctx_t *ctx;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iIKi|z:mark", kwlist,
-                                     &fanotify_fd, &flags, &mask, &dirfd, &pathname))
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "LIKi|z:mark", kwlist,
+                                     &ctx_ptr, &flags, &mask, &dirfd, &pathname))
         return NULL;
 
-    int err = fanotify_mark(fanotify_fd, flags, mask, dirfd, pathname);
+    if (!(ctx = (void *)ctx_ptr)) {
+        PyErr_SetString(PyExc_ValueError, "Invalid context");
+        return NULL;
+    }
+
+    int err = fanotify_mark(ctx->fano_fd, flags, mask, dirfd, pathname);
     if (err == -1) {
         if (pathname)
             return PyErr_SetFromErrnoWithFilename(PyExc_OSError, pathname);
         else
             return PyErr_SetFromErrno(PyExc_OSError);
+    }
+    if (!(flags & (FAN_MARK_IGNORED_MASK | FAN_MARK_IGNORED_SURV_MODIFY))
+            && flags & (FAN_MARK_FILESYSTEM | FAN_MARK_ONLYDIR)) {
+        if (flags & FAN_MARK_ADD)
+            fs_list_add(&ctx->fs_list, pathname);
+        else
+            fs_list_del(&ctx->fs_list, pathname);
     }
 
     Py_RETURN_NONE;
@@ -599,8 +724,10 @@ handle_events(fano_ctx_t *ctx)
                     _fd = &dfd;
 
                 if (file_handle) {
-                    int evt_fd = open_by_handle_at(AT_FDCWD, file_handle, O_FLAGS);
-                    if ((evt_fd == FAN_NOFD) && (errno == ESTALE))
+                    int evt_fd;
+                    fs_list_t *fs = fs_list_get_fs(&ctx->fs_list, (void *)&fid->fsid);
+                    if (!fs || (((evt_fd = open_by_handle_at(fs->fd, file_handle, O_FLAGS)) == FAN_NOFD)
+                                && (errno == ESTALE)))
                         goto info_next;
                     close(*_fd);
                     *_fd = evt_fd;
@@ -693,10 +820,10 @@ handle_events(fano_ctx_t *ctx)
                         continue;
 
                     int e = errno;
-                    do_log(ctx, "Fanotify: send_data error for %s: %s",
+                    do_log(ctx, "FileMonitor: send_data error for %s: %s",
                           rule->name.buf, strerror(e));
                     if (e == ECONNREFUSED) {
-                        do_log(ctx, "Fanotify: delete \"%s\"", rule->name.buf);
+                        do_log(ctx, "FileMonitor: delete \"%s\"", rule->name.buf);
                         to_del.next = rule->next;
                         rules_list_raw_del(&ctx->rules, rule->hash);
                         rule = &to_del;
@@ -712,7 +839,7 @@ end:
 }
 
 PyDoc_STRVAR(run__doc__,
-"run(fano_fd: int, main_pid: int, rcon: Connection[, log_fd: int, fn, fn_args, fn_timeout=0]) -> None\n"
+"run(ctx: int, rcon: Connection[, log_fd: int, fn, fn_args, fn_timeout=0]) -> None\n"
 "\n"
 "Main routine. If the event matches the rule, information about the event\n"
 "will be sent to the unix socket named \"\\0\" + rule.name\n"
@@ -727,8 +854,7 @@ PyDoc_STRVAR(run__doc__,
 "        otherwise empty string;\n"
 "\n"
 "Args:\n"
-"    fano_fd (int): Fanotify file descriptor.\n"
-"    main_pid (int): Main process PID, itself and its children will be excluded.\n"
+"    ctx (int): Fanotify context.\n"
 "    rcon (Connection): Connection for read commands.\n"
 "    log_fd (int): Optionally. Logger file descriptor.\n"
 "        Message format:\n"
@@ -745,21 +871,27 @@ PyDoc_STRVAR(run__doc__,
 static PyObject *
 pyfanotify_run(PyObject *self, PyObject *args, PyObject *kwargs)
 {
-    static char *kwlist[] = {"fano_fd", "main_pid", "rcon",
+    static char *kwlist[] = {"ctx", "rcon",
                              "log_fd", "fn", "fn_args", "fn_timeout", 0};
-    fano_ctx_t *ctx = calloc(1, sizeof(*ctx));  // freed automatically when the process ends
-    ctx->fano_fd = ctx->log_fd = ctx->sock_fd = -1;
-    ctx->cache_idx = ctx->pid_cache;
-
-    int rfd = -1, err = 0;
+    long long ctx_ptr;
+    int rfd = -1, err = 0, log_fd = -1;
     time_t fn_timeout = 0;
     pid_t ppid = getppid();
+    fano_ctx_t *ctx;
     PyObject *rcon, *tmp = NULL, *fn = NULL, *fn_args = NULL;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ilO|iOOl:run", kwlist,
-                                     &ctx->fano_fd, &ctx->main_pid, &rcon,
-                                     &ctx->log_fd, &fn, &fn_args, &fn_timeout))
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "LO|iOOl:run", kwlist,
+                                     &ctx_ptr, &rcon,
+                                     &log_fd, &fn, &fn_args, &fn_timeout))
         return 0;
+
+    if (!(ctx = (void *)ctx_ptr)) {
+        PyErr_SetString(PyExc_ValueError, "Invalid context");
+        err = PY_FILLED_ERR;
+        fn = fn_args = 0;
+        goto end;
+    }
+    ctx->log_fd = log_fd;
 
     if (ctx->fano_fd < 0) {
         err = errno = EBADF;
@@ -889,6 +1021,8 @@ end:
         close(ctx->fano_fd);
     close(ctx->sock_fd);
     rules_list_clear(&ctx->rules);
+    fs_list_clear(&ctx->fs_list);
+    free(ctx);
     Py_XDECREF(fn);
     Py_XDECREF(fn_args);
     switch (err) {
@@ -917,19 +1051,20 @@ end:
 
 
 static PyMethodDef ext_methods[] = {
-    {"init", (PyCFunction)pyfanotify_init, METH_VARARGS | METH_KEYWORDS, init__doc__},
-    {"mark", (PyCFunction)pyfanotify_mark, METH_VARARGS | METH_KEYWORDS, mark__doc__},
-    {"run", (PyCFunction)pyfanotify_run, METH_VARARGS | METH_KEYWORDS, run__doc__},
+        {"create", (PyCFunction)pyfanotify_create, METH_NOARGS, create__doc__},
+        {"init", (PyCFunction)pyfanotify_init, METH_VARARGS | METH_KEYWORDS, init__doc__},
+        {"mark", (PyCFunction)pyfanotify_mark, METH_VARARGS | METH_KEYWORDS, mark__doc__},
+        {"run", (PyCFunction)pyfanotify_run, METH_VARARGS | METH_KEYWORDS, run__doc__},
 //        {"response", (PyCFunction)pyfanotify_response, METH_VARARGS | METH_KEYWORDS, response__doc__},
-    {NULL, NULL, 0, NULL}
+        {NULL, NULL, 0, NULL}
 };
 
 static struct PyModuleDef moduledef = {
-    PyModuleDef_HEAD_INIT,
-    .m_name = "ext",
-    .m_doc = ext__doc__,
-    .m_size = -1,
-    .m_methods = ext_methods,
+        PyModuleDef_HEAD_INIT,
+        .m_name = "ext",
+        .m_doc = ext__doc__,
+        .m_size = -1,
+        .m_methods = ext_methods,
 };
 
 PyMODINIT_FUNC

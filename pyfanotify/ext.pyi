@@ -81,7 +81,17 @@ CMD_STOP: int
 CMD_CONNECT: int
 CMD_DISCONNECT: int
 
-def init(flags: int, o_flags: int) -> int:
+
+def create() -> int:
+    """
+    Create fanotify context
+
+    Raises:
+        OSError
+    """
+    return 0
+
+def init(ctx: int, flags: int, o_flags: int) -> int:
     """
     Wrapper for fanotify_init. See manpage for more details:
     https://man7.org/linux/man-pages/man2/fanotify_init.2.html
@@ -94,7 +104,7 @@ def init(flags: int, o_flags: int) -> int:
     """
     return -1
 
-def mark(fd: int, flags: int, mask: int, dirfd: int, pathname: str = None) -> None:
+def mark(ctx: int, flags: int, mask: int, dirfd: int, pathname: str = None) -> None:
     """
     Wrapper for fanotify_mark. See manpage for more details:
     https://man7.org/linux/man-pages/man2/fanotify_mark.2.html
@@ -104,7 +114,7 @@ def mark(fd: int, flags: int, mask: int, dirfd: int, pathname: str = None) -> No
     """
     return
 
-def run(fano_fd: int, main_pid: int, rcon: Connection, log_fd: int = None, fn: Callable = None, fn_args: Tuple = None, fn_timeout: int = 0) -> None:
+def run(ctx: int, rcon: Connection, log_fd: int = None, fn: Callable = None, fn_args: Tuple = None, fn_timeout: int = 0) -> None:
     """
     Main routine. If the event matches the rule, information about the event
     will be sent to the unix socket named `"\\\\0 + rule.name"`
@@ -115,8 +125,7 @@ def run(fano_fd: int, main_pid: int, rcon: Connection, log_fd: int = None, fn: C
      * path: path of `fd`, if the rules was matched using `rule.path_pattern`; otherwise empty string;
 
     Args:
-        fano_fd (int): Fanotify file descriptor.
-        main_pid (int): Main process PID, itself and its children will be excluded.
+        ctx (int): Fanotify context.
         rcon (Connection): Connection for read commands.
         log_fd (int): Optionally. Logger file descriptor.
             Message format:
