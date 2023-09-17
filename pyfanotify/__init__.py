@@ -195,8 +195,6 @@ class Fanotify(mp.Process):
         self._fn_args = fn_args
         self._fn_timeout = int(fn_timeout)
 
-        atexit.register(lambda x: (x.stop(), x.join()), self)
-
     @property
     def with_fid(self) -> bool:
         return self._with_fid
@@ -209,6 +207,7 @@ class Fanotify(mp.Process):
         if self._is_ready:
             self._is_ready = False
             super(Fanotify, self).start()
+            atexit.register(lambda x: (x.stop(), x.join()), self)
 
     def run(self) -> None:
         self._debug('start')
