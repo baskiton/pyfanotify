@@ -104,7 +104,7 @@ def mark(fd: int, flags: int, mask: int, dirfd: int, pathname: str = None) -> No
     """
     return
 
-def run(fd: int, rcon: Connection, log_fd: int = None, fn: Callable = None, fn_args: Tuple = None, fn_timeout: int = 0) -> None:
+def run(fano_fd: int, main_pid: int, rcon: Connection, log_fd: int = None, fn: Callable = None, fn_args: Tuple = None, fn_timeout: int = 0) -> None:
     """
     Main routine. If the event matches the rule, information about the event
     will be sent to the unix socket named `"\\\\0 + rule.name"`
@@ -115,7 +115,8 @@ def run(fd: int, rcon: Connection, log_fd: int = None, fn: Callable = None, fn_a
      * path: path of `fd`, if the rules was matched using `rule.path_pattern`; otherwise empty string;
 
     Args:
-        fd (int): Fanotify file descriptor.
+        fano_fd (int): Fanotify file descriptor.
+        main_pid (int): Main process PID, itself and its children will be excluded.
         rcon (Connection): Connection for read commands.
         log_fd (int): Optionally. Logger file descriptor.
             Message format:

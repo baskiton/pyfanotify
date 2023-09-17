@@ -352,7 +352,7 @@ class Fanotify(mp.Process):
         self._rd.close()
 
     def _action(self) -> None:
-        ext.run(self._fd, self._rd, sys.stdout.fileno(), self._fn, self._fn_args, self._fn_timeout)
+        ext.run(self._fd, self._pid, self._rd, sys.stdout.fileno(), self._fn, self._fn_args, self._fn_timeout)
 
     def _debug(self, *args, **kwargs) -> None:
         if self._log:

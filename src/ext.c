@@ -36,14 +36,45 @@ PyDoc_STRVAR(ext__doc__,
 #endif
 
 #define O_FLAGS (O_RDONLY|O_LARGEFILE|O_CLOEXEC|O_NOATIME)
+#define PID_CACHE_SIZE 64
+
+enum RUN_ERR_CODE {
+    PY_FILLED_ERR = -100,
+    FANO_MISMATCH_VER,
+};
+
+typedef struct c_rule c_rule_t;
+
+typedef struct {
+    pid_t pid;
+    char our;
+} pid_cache_t;
+
+typedef struct {
+    c_rule_t *rules;
+    pid_cache_t *cache_idx;
+    pid_cache_t pid_cache[PID_CACHE_SIZE];
+    long main_pid;
+    int fano_fd;
+    int log_fd;
+    int sock_fd;
+} fano_ctx_t;
 
 typedef struct str_val {
     uint32_t len;
     char buf[PATH_MAX];
 } str_val_t;
 
+typedef struct {
+    char *buf;
+    size_t bufsz;
+    size_t size;
+} buffer_t;
+
+#define BUFFER_INIT { .bufsz = 512 }
+
 struct c_rule {
-    struct c_rule *next;
+    c_rule_t *next;
     ssize_t hash;
     unsigned long ev_types;
     size_t pids_cnt;
@@ -95,7 +126,7 @@ typedef struct {
 })
 
 static void
-rules_list_add(struct c_rule **rules, ext_FanoRule *rule)
+rules_list_add(c_rule_t **rules, ext_FanoRule *rule)
 {
     ssize_t hash = PyObject_Hash(rule->name.obj);
     while (*rules) {
@@ -103,7 +134,7 @@ rules_list_add(struct c_rule **rules, ext_FanoRule *rule)
             return;
         rules = &(*rules)->next;
     }
-    struct c_rule *new;
+    c_rule_t *new;
     if (!(new = PyMem_Malloc(sizeof(*new))))
         return;
 
@@ -136,11 +167,11 @@ rules_list_add(struct c_rule **rules, ext_FanoRule *rule)
 }
 
 static void
-rules_list_raw_del(struct c_rule **rules, long hash)
+rules_list_raw_del(c_rule_t **rules, long hash)
 {
     while (*rules) {
         if (hash == (*rules)->hash) {
-            struct c_rule *next = (*rules)->next;
+            c_rule_t *next = (*rules)->next;
             PyMem_Free((*rules)->pids);
             PyMem_Free(*rules);
             *rules = next;
@@ -151,17 +182,17 @@ rules_list_raw_del(struct c_rule **rules, long hash)
 }
 
 static void
-rules_list_del(struct c_rule **rules, ext_FanoRule *rule)
+rules_list_del(c_rule_t **rules, ext_FanoRule *rule)
 {
     rules_list_raw_del(rules, PyObject_Hash(rule->name.obj));
 }
 
 static void
-rules_list_clear(struct c_rule **rules)
+rules_list_clear(c_rule_t **rules)
 {
-    struct c_rule *item = *rules;
+    c_rule_t *item = *rules;
     while (item) {
-        struct c_rule *next = item->next;
+        c_rule_t *next = item->next;
         PyMem_Free(item->pids);
         PyMem_Free(item);
         item = next;
@@ -170,7 +201,7 @@ rules_list_clear(struct c_rule **rules)
 }
 
 static unsigned char
-rule_pids_check(struct c_rule *rule, pid_t pid)
+rule_pids_check(c_rule_t *rule, pid_t pid)
 {
     if (rule->pids) {
         for (size_t i = 0; i < rule->pids_cnt; ++i)
@@ -391,9 +422,9 @@ do_write(int fd, const void *data, size_t len)
 }
 
 static void
-do_log(int fd, const char *fmt, ...)
+do_log(fano_ctx_t *ctx, const char *fmt, ...)
 {
-    if (fd < 0)
+    if (ctx->fano_fd < 0)
         return;
 
     char msg[4096];
@@ -410,57 +441,7 @@ do_log(int fd, const char *fmt, ...)
     if (len > sizeof(msg) - hdr_len)
         len = sizeof(msg) - hdr_len;
     *(uint32_t *)msg = len;
-    do_write(fd, &msg, len + hdr_len);
-}
-
-static int
-send_data(int sk_fd, struct c_rule *rule, const struct fanotify_event_metadata *ev,
-          str_val_t *exe, str_val_t *cwd, str_val_t *path)
-{
-    struct {
-        int64_t pid;
-        uint64_t ev_types;
-    } data = {ev->pid, ev->mask};
-    struct iovec iov[] = {
-        {&data, sizeof(data)},
-        {exe, exe->len + sizeof(exe->len)},
-        {cwd, cwd->len + sizeof(exe->len)},
-        {path, path->len + sizeof(exe->len)},
-    };
-    struct sockaddr_un addr = {.sun_family = AF_UNIX};
-    addr.sun_path[0] = '\0';
-
-    memcpy(addr.sun_path + 1, rule->name.buf, rule->name.len);
-    struct msghdr msg = {
-        .msg_name = &addr,
-        .msg_namelen = rule->name.len + offsetof(struct sockaddr_un, sun_path) + 1,
-        .msg_flags = 0,
-        .msg_iov = iov,
-        .msg_iovlen = sizeof(iov) / sizeof(*iov),
-    };
-    struct __attribute__((packed)) {
-        struct cmsghdr cm;
-        int fd;
-    } cmsg;
-    if (rule->pass_fd && ev->fd >= 0) {
-        cmsg.cm.cmsg_len = sizeof(cmsg);
-        cmsg.cm.cmsg_level = SOL_SOCKET;
-        cmsg.cm.cmsg_type = SCM_RIGHTS;
-        cmsg.fd = ev->fd;
-        msg.msg_control = &cmsg;
-        msg.msg_controllen = sizeof(cmsg);
-    }
-    for (int i = 0; i < 3; ++i) {
-        if (sendmsg(sk_fd, &msg, 0) < 0) {
-            if (AGAIN)
-                usleep(250000);
-            else if (errno != EINTR)
-                return errno;
-            continue;
-        }
-        break;
-    }
-    return 0;
+    do_write(ctx->fano_fd, &msg, len + hdr_len);
 }
 
 static ssize_t
@@ -475,54 +456,114 @@ get_proc_str(const char *fmt, int meta, char *buf, size_t buf_size)
     return path_len;
 }
 
-#define FIND_RULE_CHECK_MATCH(name, fmt, meta) ({           \
-        if (rule->name##_pattern.len) {                     \
-            if (!((name).buf[0]) &&                         \
-                !((name).len = get_proc_str(fmt, ev->meta,  \
-                        (name).buf, sizeof((name).buf))))   \
-                goto rules_cycle_continue;                  \
-            if (fnmatch(rule->name##_pattern.buf,           \
-                        (name).buf, FNM_EXTMATCH))          \
-                goto rules_cycle_continue;                  \
-        }                                                   \
-})
+static char *
+_readfd(buffer_t *bb, int fd)
+{
+    bb->size = 0;
+    ssize_t n;
+    size_t tot = 0;
+    do {
+        if ((tot >= bb->bufsz || !bb->buf) && !(bb->buf = realloc(bb->buf, bb->bufsz <<= 1)))
+            return 0;
+        if ((n = read(fd, &bb->buf[tot], bb->bufsz - tot)) != -1)
+            tot += n;
+        else if (errno != EINTR)
+            return 0;
+    } while (n);
+    bb->size = tot;
+    return bb->buf;
+}
+
+static pid_cache_t *
+pid_cache_check(fano_ctx_t *ctx, buffer_t *bb, pid_t pid)
+{
+    pid_cache_t *c = ctx->cache_idx;
+    for (unsigned i = PID_CACHE_SIZE; i--;) {
+        if (c->pid == pid)
+            return c;
+        if (++c >= &ctx->pid_cache[PID_CACHE_SIZE])
+            c = ctx->pid_cache;
+    }
+
+    if (c-- == ctx->pid_cache)
+        c = &ctx->pid_cache[PID_CACHE_SIZE - 1];
+    *c = (pid_cache_t){.pid = pid};
+
+    long p = (long)pid;
+    for (;;) {
+        if (p == ctx->main_pid) {
+            c->our = 1;
+            break;
+        }
+
+        char path[64], *ptr;
+        snprintf(path, sizeof(path), "/proc/%ld/stat", p);
+        int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOCTTY);
+        if (fd == -1)
+            break;
+
+        char *buf = _readfd(bb, fd);
+        close(fd);
+        if (!buf)
+            break;
+        buf[bb->size] = 0;
+
+        if (!(ptr = strrchr(buf, ')')))
+            break;
+        ptr += 4;
+
+        // fields: https://man7.org/linux/man-pages/man5/proc.5.html
+        // field #4 - PPid
+        if (!(p = (long)strtoull(ptr, 0, 10)))
+            break;
+    }
+
+    return (ctx->cache_idx = c);
+}
 
 static int
-handle_events(int fd, struct c_rule **rules, int sk_fd, int log_fd)
+handle_events(fano_ctx_t *ctx)
 {
-    uint8_t buf[8192];
-    struct fanotify_event_metadata *ev = (void *)buf;
+    struct fanotify_event_metadata buf[256];
     ssize_t len;
-    str_val_t exe, cwd, path, evt;
-    int sk_res;
+    buffer_t bb = BUFFER_INIT;
+    int ret = 0;
 
-    struct fanotify_event_info_header *finfo;
-    struct fanotify_event_info_fid *fid;
-//    struct fanotify_event_info_pidfd *pidfd;
-//    struct fanotify_event_info_error *ierror;
-    struct file_handle *file_handle;
-    const char *file_name;
-    ssize_t info_len;
+    if ((len = read(ctx->fano_fd, buf, sizeof(buf))) == -1) {
+        ret = errno;
+        goto end;
+    }
 
-    if ((len = read(fd, buf, sizeof(buf))) == -1)
-        return errno;
+    for (struct fanotify_event_metadata *ev = buf;
+            FAN_EVENT_OK(ev, len);
+            close(ev->fd), ev = FAN_EVENT_NEXT(ev, len)){
+        if (ev->vers != FANOTIFY_METADATA_VERSION) {
+            ret = FANO_MISMATCH_VER;
+            goto end;
+        }
 
-    while (FAN_EVENT_OK(ev, len)) {
-        if (ev->vers != FANOTIFY_METADATA_VERSION)
-            return -101;
+        if (pid_cache_check(ctx, &bb, ev->pid)->our)
+            // skip ours
+            continue;
 
+        str_val_t exe, cwd, path, evt;
         exe.buf[0] = cwd.buf[0] = path.buf[0] = evt.buf[0] = '\0';
         exe.len = cwd.len = path.len = evt.len = 0;
+        c_rule_t to_del;
 
 #ifdef FAN_REPORT_FID
         if (ev->event_len != FAN_EVENT_METADATA_LEN) {
-            info_len = ev->event_len - ev->metadata_len;
+            struct fanotify_event_info_fid *fid;
+            struct fanotify_event_info_header *finfo = (struct fanotify_event_info_header *)(ev + 1);
+//            struct fanotify_event_info_pidfd *pidfd;
+//            struct fanotify_event_info_error *ierror;
+            struct file_handle *file_handle = NULL;
+            const char *file_name = NULL;
+            ssize_t info_len = ev->event_len - ev->metadata_len;
             ssize_t rest = info_len;
             int ffd = FAN_NOFD, dfd = FAN_NOFD, *_fd = NULL;
-            finfo = (struct fanotify_event_info_header *)(ev + 1);
-            file_name = NULL;
-            file_handle = NULL;
 
+            int cont = 0;
             while (rest) {
                 switch (finfo->info_type) {
                 case FAN_EVENT_INFO_TYPE_FID:
@@ -543,7 +584,7 @@ handle_events(int fd, struct c_rule **rules, int sk_fd, int log_fd)
 //                    do_log(log_fd, "Fanotify: invalid info_type: %d\n\n", finfo->info_type);
                     close(ffd);
                     close(dfd);
-                    goto evt_end;
+                    goto fid_end;
                 }
 # ifdef FAN_REPORT_DIR_FID
                 if (finfo->info_type == FAN_EVENT_INFO_TYPE_DFID_NAME)
@@ -590,46 +631,88 @@ handle_events(int fd, struct c_rule **rules, int sk_fd, int log_fd)
                     path.len = stpncpy(path.buf + path.len + 1, file_name, sizeof(path.buf) - path.len - 1) - path.buf;
                 }
             } else
-                goto evt_end;
+                cont = 1;
+        fid_end:
+            if (cont)
+                continue;
         }
 #endif // FAN_REPORT_FID
 
-        for (struct c_rule *rule = *rules; rule;) {
-            if (rule_pids_check(rule, ev->pid))
-                goto rules_cycle_continue;
-            if (rule->ev_types && !(rule->ev_types & ev->mask))
-                goto rules_cycle_continue;
+        for (c_rule_t *rule = ctx->rules; rule; rule = rule->next) {
 
-            FIND_RULE_CHECK_MATCH(exe, "/proc/%d/exe", pid);
-            FIND_RULE_CHECK_MATCH(cwd, "/proc/%d/cwd", pid);
-            FIND_RULE_CHECK_MATCH(path, "/proc/self/fd/%d", fd);
+# define RULE_MATCH(name, fmt, meta)    \
+        (rule->name##_pattern.len       \
+            && (!((name).buf[0]         \
+                    || ((name).len = get_proc_str(fmt, ev->meta, (name).buf, sizeof((name).buf))))  \
+                || fnmatch(rule->name##_pattern.buf, (name).buf, FNM_EXTMATCH)))
 
-            if ((sk_res = send_data(sk_fd, rule, ev, &exe, &cwd, &path))) {
-                do_log(log_fd, "Fanotify: send_data error for %s: %s",
-                       rule->name.buf, strerror(sk_res));
-                if (sk_res == ECONNREFUSED) {
-                    do_log(log_fd, "Fanotify: delete \"%s\"", rule->name.buf);
-                    struct c_rule *to_del = rule;
-                    rule = rule->next;
-                    rules_list_raw_del(rules, to_del->hash);
-                    continue;
-                }
+            if (rule_pids_check(rule, ev->pid)
+                    || (rule->ev_types && !(rule->ev_types & ev->mask))
+                    || RULE_MATCH(exe, "/proc/%ld/exe", pid)
+                    || RULE_MATCH(cwd, "/proc/%ld/cwd", pid)
+                    || RULE_MATCH(path, "/proc/self/fd/%ld", fd))
+                continue;
+# undef RULE_MATCH
+
+            // sending data
+            struct {
+                int64_t pid;
+                uint64_t ev_types;
+            } data = {ev->pid, ev->mask};
+            struct iovec iov[] = {
+                    {&data, sizeof(data)},
+                    {&exe, exe.len + sizeof(exe.len)},
+                    {&cwd, cwd.len + sizeof(exe.len)},
+                    {&path, path.len + sizeof(exe.len)},
+            };
+            struct sockaddr_un addr = {.sun_family = AF_UNIX};
+            memcpy(addr.sun_path + 1, rule->name.buf, rule->name.len);
+            struct msghdr msg = {
+                    .msg_name = &addr,
+                    .msg_namelen = rule->name.len + offsetof(struct sockaddr_un, sun_path) + 1,
+                    .msg_flags = 0,
+                    .msg_iov = iov,
+                    .msg_iovlen = sizeof(iov) / sizeof(*iov),
+            };
+            struct __attribute__((packed)) {
+                struct cmsghdr cm;
+                int fd;
+            } cmsg;
+            if (rule->pass_fd && ev->fd != FAN_NOFD) {
+                cmsg.cm.cmsg_len = sizeof(cmsg),
+                cmsg.cm.cmsg_level = SOL_SOCKET,
+                cmsg.cm.cmsg_type = SCM_RIGHTS,
+                cmsg.fd = ev->fd,
+                msg.msg_control = &cmsg;
+                msg.msg_controllen = sizeof(cmsg);
             }
 
-        rules_cycle_continue:
-            rule = rule->next;
+            for (int i = 0; i < 3; ++i) {
+                if (sendmsg(ctx->sock_fd, &msg, 0) < 0) {
+                    if ((AGAIN && (usleep(250000) <= 0)) || errno == EINTR)
+                        continue;
+
+                    int e = errno;
+                    do_log(ctx, "Fanotify: send_data error for %s: %s",
+                          rule->name.buf, strerror(e));
+                    if (e == ECONNREFUSED) {
+                        do_log(ctx, "Fanotify: delete \"%s\"", rule->name.buf);
+                        to_del.next = rule->next;
+                        rules_list_raw_del(&ctx->rules, rule->hash);
+                        rule = &to_del;
+                    }
+                }
+                break;
+            }
         }
-
-    evt_end:
-        close(ev->fd);
-
-        ev = FAN_EVENT_NEXT(ev, len);
     }
-    return 0;
+end:
+    free(bb.buf);
+    return ret;
 }
 
 PyDoc_STRVAR(run__doc__,
-"run(fd: int, rcon: Connection[, log_fd: int, fn, fn_args, fn_timeout=0]) -> None\n"
+"run(fano_fd: int, main_pid: int, rcon: Connection[, log_fd: int, fn, fn_args, fn_timeout=0]) -> None\n"
 "\n"
 "Main routine. If the event matches the rule, information about the event\n"
 "will be sent to the unix socket named \"\\0\" + rule.name\n"
@@ -644,7 +727,8 @@ PyDoc_STRVAR(run__doc__,
 "        otherwise empty string;\n"
 "\n"
 "Args:\n"
-"    fd (int): Fanotify file descriptor.\n"
+"    fano_fd (int): Fanotify file descriptor.\n"
+"    main_pid (int): Main process PID, itself and its children will be excluded.\n"
 "    rcon (Connection): Connection for read commands.\n"
 "    log_fd (int): Optionally. Logger file descriptor.\n"
 "        Message format:\n"
@@ -661,26 +745,30 @@ PyDoc_STRVAR(run__doc__,
 static PyObject *
 pyfanotify_run(PyObject *self, PyObject *args, PyObject *kwargs)
 {
-    static char *kwlist[] = {"fd", "rcon", "log_fd",
-                             "fn", "fn_args", "fn_timeout", 0};
-    int fd, rfd = -1, log_fd = -1, err = 0, sk = -1;
+    static char *kwlist[] = {"fano_fd", "main_pid", "rcon",
+                             "log_fd", "fn", "fn_args", "fn_timeout", 0};
+    fano_ctx_t *ctx = calloc(1, sizeof(*ctx));  // freed automatically when the process ends
+    ctx->fano_fd = ctx->log_fd = ctx->sock_fd = -1;
+    ctx->cache_idx = ctx->pid_cache;
+
+    int rfd = -1, err = 0;
     time_t fn_timeout = 0;
     pid_t ppid = getppid();
-    struct c_rule *rules = NULL;
     PyObject *rcon, *tmp = NULL, *fn = NULL, *fn_args = NULL;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iO|iOOl:run", kwlist,
-                                     &fd, &rcon, &log_fd, &fn, &fn_args, &fn_timeout))
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ilO|iOOl:run", kwlist,
+                                     &ctx->fano_fd, &ctx->main_pid, &rcon,
+                                     &ctx->log_fd, &fn, &fn_args, &fn_timeout))
         return 0;
 
-    if (fd < 0) {
+    if (ctx->fano_fd < 0) {
         err = errno = EBADF;
         fn = fn_args = 0;
         goto end;
     }
     if (fn_timeout < 0) {
         PyErr_SetString(PyExc_ValueError, "timeout must be non-negative");
-        err = -100;
+        err = PY_FILLED_ERR;
         fn = fn_args = 0;
         goto end;
     }
@@ -689,7 +777,7 @@ pyfanotify_run(PyObject *self, PyObject *args, PyObject *kwargs)
             Py_INCREF(fn);
         } else {
             fn = fn_args = NULL;
-            err = -100;
+            err = PY_FILLED_ERR;
             PyErr_Format(PyExc_TypeError, "'%.200s' object is not callable",
                          fn->ob_type->tp_name);
             goto end;
@@ -703,7 +791,7 @@ pyfanotify_run(PyObject *self, PyObject *args, PyObject *kwargs)
     if (!((tmp = PyObject_CallMethod(rcon, "fileno", NULL))
             && ((rfd = (int)PyLong_AsLong(tmp)) >= 0))) {
         Py_XDECREF(tmp);
-        err = -100;
+        err = PY_FILLED_ERR;
         goto end;
     }
     Py_XDECREF(tmp);
@@ -711,10 +799,10 @@ pyfanotify_run(PyObject *self, PyObject *args, PyObject *kwargs)
 
     struct pollfd fds[] = {
         {rfd, POLLIN, 0},
-        {fd, POLLIN, 0},
+        {ctx->fano_fd, POLLIN, 0},
     };
 
-    if ((sk = socket(PF_UNIX, SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK, 0)) == -1) {
+    if ((ctx->sock_fd = socket(PF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0)) == -1) {
         err = errno;
         goto end;
     }
@@ -723,7 +811,7 @@ pyfanotify_run(PyObject *self, PyObject *args, PyObject *kwargs)
     PyThreadState *state = PyEval_SaveThread();
     while (ppid == getppid()) {
         do {
-            if (rules && fn) {
+            if (ctx->rules && fn) {
                 if (fn_timeout) {
                     time_t tmp_time = time(0);
                     if (tmp_time - fn_timer < fn_timeout)
@@ -747,7 +835,7 @@ pyfanotify_run(PyObject *self, PyObject *args, PyObject *kwargs)
             continue;
 
         if (fds[0].revents & POLLIN) {
-            struct c_rule *old = rules;
+            c_rule_t *old = ctx->rules;
             PyEval_RestoreThread(state);
 
             int cmd;
@@ -755,7 +843,7 @@ pyfanotify_run(PyObject *self, PyObject *args, PyObject *kwargs)
             if (!((tmp = PyObject_CallMethod(rcon, "recv", NULL))
                     && PyArg_ParseTuple(tmp, "i|O", &cmd, &val))) {
                 Py_XDECREF(tmp);
-                err = -100;
+                err = PY_FILLED_ERR;
                 goto end;
             }
             switch (cmd) {
@@ -764,21 +852,21 @@ pyfanotify_run(PyObject *self, PyObject *args, PyObject *kwargs)
                 err = 0;
                 goto end;
             case CMD_CONNECT:
-                rules_list_add(&rules, (void *)val);
+                rules_list_add(&ctx->rules, (void *)val);
                 break;
             case CMD_DISCONNECT:
-                rules_list_del(&rules, (void *)val);
+                rules_list_del(&ctx->rules, (void *)val);
             default:
                 break;
             }
             Py_XDECREF(tmp);
 
             state = PyEval_SaveThread();
-            if (!old && rules)
+            if (!old && ctx->rules)
                 fn_timer = 0;
-            else if (old && !rules) {   // flush
-                fanotify_mark(fd, FAN_MARK_FLUSH, 0, AT_FDCWD, 0);
-                fanotify_mark(fd, FAN_MARK_FLUSH|FAN_MARK_MOUNT, 0, AT_FDCWD, 0);
+            else if (old && !ctx->rules) {   // flush
+                fanotify_mark(ctx->fano_fd, FAN_MARK_FLUSH, 0, AT_FDCWD, 0);
+                fanotify_mark(ctx->fano_fd, FAN_MARK_FLUSH | FAN_MARK_MOUNT, 0, AT_FDCWD, 0);
             }
 
         } else if (fds[0].revents & POLLNVAL) {
@@ -787,7 +875,7 @@ pyfanotify_run(PyObject *self, PyObject *args, PyObject *kwargs)
         }
 
         if (fds[1].revents & POLLIN) {
-            if ((err = handle_events(fds[1].fd, &rules, sk, log_fd)))
+            if ((err = handle_events(ctx)))
                 break;
         } else if (fds[1].revents & POLLNVAL) {
             err = errno = EBADF;
@@ -797,21 +885,23 @@ pyfanotify_run(PyObject *self, PyObject *args, PyObject *kwargs)
     PyEval_RestoreThread(state);
 
 end:
-    close(sk);
-    rules_list_clear(&rules);
+    if (dup2(1, ctx->fano_fd) == -1)
+        close(ctx->fano_fd);
+    close(ctx->sock_fd);
+    rules_list_clear(&ctx->rules);
     Py_XDECREF(fn);
     Py_XDECREF(fn_args);
     switch (err) {
-        case 0:
-            Py_RETURN_NONE;
-        case -101:
-            PyErr_SetString(PyExc_AssertionError, "Mismatch of fanotify metadata version.");
-            return 0;
-        default:
-            errno = err;
-            PyErr_SetFromErrno(PyExc_OSError);
-        case -100:
-            return 0;
+    case 0:
+        Py_RETURN_NONE;
+    case FANO_MISMATCH_VER:
+        PyErr_SetString(PyExc_AssertionError, "Mismatch of fanotify metadata version.");
+        return 0;
+    default:
+        errno = err;
+        PyErr_SetFromErrno(PyExc_OSError);
+    case PY_FILLED_ERR:
+        return 0;
     }
 }
 
