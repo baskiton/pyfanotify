@@ -25,7 +25,7 @@ import pyfanotify
 
 project = 'pyfanotify'
 author = 'baskiton'
-copyright = f'{datetime.datetime.now().year}, {author}'
+copyright = '%s, %s' % (datetime.datetime.now().year, author)
 
 # The short X.Y version
 version = parse_version(pyfanotify.__version__).base_version

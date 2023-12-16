@@ -6,9 +6,9 @@ import sys
 from setuptools import find_packages, setup, Extension
 
 
-MINIMAL_PY_VERSION = (3, 6)
+MINIMAL_PY_VERSION = (3, 5)
 if sys.version_info < MINIMAL_PY_VERSION:
-    raise RuntimeError('This app works only with Python {}+'.format('.'.join(map(str, MINIMAL_PY_VERSION))))
+    raise RuntimeError('This app works only with Python %s+' % '.'.join(map(str, MINIMAL_PY_VERSION)))
 
 
 def get_file(rel_path):
@@ -24,7 +24,7 @@ def get_version():
 ext = Extension(
     'pyfanotify.ext',
     sources=['src/ext.c'],
-    extra_compile_args=['-std=c99'],
+    extra_compile_args=['-std=c99', '-Wno-strict-aliasing'],
 )
 
 setup(
@@ -50,5 +50,5 @@ setup(
         'Topic :: System :: Operating System Kernels :: Linux',
     ],
     keywords='linux kernel fanotify',
-    python_requires='>=3.6',
+    python_requires='>=3.5',
 )

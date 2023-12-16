@@ -169,7 +169,7 @@ class Fanotify(mp.Process):
                     self._exception('No fanotify!')
                     e.strerror += ': No fanotify!'
                 else:
-                    self._exception(f'Fanotify init: {e}')
+                    self._exception('Fanotify init: %s', e)
                 raise
 
         flags = _INIT_FLAGS
@@ -180,8 +180,8 @@ class Fanotify(mp.Process):
         try:
             self._fd = ext.init(self._ctx, flags, _INIT_O_FLAGS)
         except OSError as e:
-            e.strerror = f'Fanotify init: {e.strerror}'
-            self._exception(f'{e}')
+            e.strerror = 'Fanotify init: %s' % e.strerror
+            self._exception(str(e))
             raise
 
         self._rd, self._wr = mp.Pipe(False)
@@ -192,7 +192,7 @@ class Fanotify(mp.Process):
             raise TypeError("'fn' is not callable")
         self._fn = fn
         if not isinstance(fn_args, tuple):
-            raise TypeError(f"'fn_args': expected 'tuple', got '{type(fn_args)}' instead.")
+            raise TypeError("'fn_args': expected 'tuple', got '%s' instead." % type(fn_args))
         self._fn_args = fn_args
         self._fn_timeout = int(fn_timeout)
 
@@ -217,7 +217,7 @@ class Fanotify(mp.Process):
         try:
             self._action()
         except BaseException as e:
-            self._exception(f'Exception occured: {e}')
+            self._exception('Exception occured: %s', e)
         finally:
             self._close()
             self._debug('finish')
@@ -243,7 +243,7 @@ class Fanotify(mp.Process):
         """
 
         if not isinstance(rule, FanoRule):
-            raise TypeError(f'Got {type(rule).__name__}, FanoRule expected')
+            raise TypeError('Got %s, FanoRule expected' % type(rule).__name__)
         self._wr.send((_CMD_CONNECT, rule))
 
     def disconnect(self, rule: FanoRule) -> None:
@@ -252,7 +252,7 @@ class Fanotify(mp.Process):
         """
 
         if not isinstance(rule, FanoRule):
-            raise TypeError(f'Got {type(rule).__name__}, FanoRule expected')
+            raise TypeError('Got %s, FanoRule expected' % type(rule).__name__)
         self._wr.send((_CMD_DISCONNECT, rule))
 
     def mark(self, path: Union[str, Iterable], ev_types: int = FAN_ALL_EVENTS,
@@ -306,11 +306,11 @@ class Fanotify(mp.Process):
 
             try:
                 ext.mark(self._ctx, flags, ev_types, AT_FDCWD, path)
-                # self._debug(f'{path} is marked')
+                # self._debug('%s is marked', path)
             except OSError as e:
-                msg = f'mark(): {e}'
+                msg = 'mark(): %s' % e
                 if e.errno == errno.EBADF:
-                    msg += f': fd={self._fd} is not an fanotify descriptor'
+                    msg += ': fd=%s is not an fanotify descriptor' % self._fd
                 elif e.errno == errno.EINVAL:
                     if self.with_fid and (ev_types & (FAN_OPEN_PERM | FAN_ACCESS_PERM | FAN_OPEN_EXEC_PERM)):
                         msg += ': PERM events are not allowed with FID report'
@@ -320,7 +320,7 @@ class Fanotify(mp.Process):
                         elif flags & FAN_MARK_MOUNT:
                             msg += ': Filesystem events not supported with mount point'
                     else:
-                        msg += f': invalid evt_types or fd={self._fd} is not an fanotify descriptor'
+                        msg += ': invalid evt_types or fd=%s is not an fanotify descriptor' % self._fd
                 self._error(msg)
         elif isinstance(path, Iterable):
             for p in path:
@@ -347,9 +347,9 @@ class Fanotify(mp.Process):
             if do_fs and FAN_MARK_FILESYSTEM:   # Linux 4.20 and above
                 ext.mark(self._ctx, FAN_MARK_FLUSH | FAN_MARK_FILESYSTEM, 0, AT_FDCWD)
         except OSError as e:
-            msg = f'flush(): {e}'
+            msg = 'flush(): %s' % e
             if e.errno == errno.EBADF:
-                msg += f': fd={self._fd} is not an fanotify descriptor'
+                msg += ': fd=%s is not an fanotify descriptor' % self._fd
             self._exception(msg)
 
     def _close(self) -> None:
@@ -399,7 +399,7 @@ class Fanotify(mp.Process):
 
     def _do_log(self, lvl: str, msg: str, *args, **kwargs) -> None:
         x = sys.stdout if (lvl in ('DEBUG', 'INFO')) else sys.stderr
-        x.write(f'{datetime.datetime.now()} {lvl}: Fanotify: {msg % args}\n')
+        x.write('%s %s: Fanotify: %s\n' % (datetime.datetime.now(), lvl, msg % args))
         x.flush()
 
 

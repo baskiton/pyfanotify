@@ -4,7 +4,7 @@ import pyfanotify as fan
 
 
 def foo(t):
-    print(f'calling `foo` every {t} seconds')
+    print('calling `foo` every %s seconds' % t)
 
 
 if __name__ == '__main__':
