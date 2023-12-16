@@ -20,6 +20,8 @@
 #include <unistd.h>
 
 
+#define FUNUSED __attribute__((unused))
+
 PyDoc_STRVAR(ext__doc__,
 "Wrapper for fanotify.\n"
 "\n"
@@ -356,6 +358,7 @@ struct _fs_list {
     int fd;
 };
 
+FUNUSED
 static void
 fs_list_add(fs_list_t **list, const char *path)
 {
@@ -384,6 +387,7 @@ fs_list_add(fs_list_t **list, const char *path)
     *list = new;
 }
 
+FUNUSED
 static void
 fs_list_del(fs_list_t **list, const char *path)
 {
@@ -414,6 +418,7 @@ fs_list_clear(fs_list_t **list)
     *list = 0;
 }
 
+FUNUSED
 static fs_list_t *
 fs_list_get_fs(fs_list_t **list, fsid_t *fsid)
 {
@@ -524,6 +529,7 @@ pyfanotify_mark(PyObject *self, PyObject *args, PyObject *kwargs)
         else
             return PyErr_SetFromErrno(PyExc_OSError);
     }
+#ifdef FAN_REPORT_FID
     if (!(flags & (FAN_MARK_IGNORED_MASK | FAN_MARK_IGNORED_SURV_MODIFY))
             && flags & (FAN_MARK_FILESYSTEM | FAN_MARK_ONLYDIR)) {
         if (flags & FAN_MARK_ADD)
@@ -531,6 +537,7 @@ pyfanotify_mark(PyObject *self, PyObject *args, PyObject *kwargs)
         else
             fs_list_del(&ctx->fs_list, pathname);
     }
+#endif // FAN_REPORT_FID
 
     Py_RETURN_NONE;
 }
@@ -1114,7 +1121,6 @@ PyInit_ext(void)
     PyModule_AddIntMacro(module, FANOTIFY_METADATA_VERSION);
     PyModule_AddIntMacro(module, FAN_ALLOW);
     PyModule_AddIntMacro(module, FAN_DENY);
-    PyModule_AddIntMacro(module, FAN_AUDIT);
     PyModule_AddIntMacro(module, FAN_NOFD);
 
     PyModule_AddIntMacro(module, O_CLOEXEC);
@@ -1125,8 +1131,10 @@ PyInit_ext(void)
 
 #ifdef FAN_ENABLE_AUDIT    // (Linux 4.15)
     PyModule_AddIntMacro(module, FAN_ENABLE_AUDIT);
+    PyModule_AddIntMacro(module, FAN_AUDIT);
 #else
     PyModule_AddIntConstant(module, "FAN_ENABLE_AUDIT", 0);
+    PyModule_AddIntConstant(module, "FAN_AUDIT", 0);
 #endif // FAN_ENABLE_AUDIT (Linux 4.15)
 
 #ifdef FAN_REPORT_TID    // (Linux 4.20)
