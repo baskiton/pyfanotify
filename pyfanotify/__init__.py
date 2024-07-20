@@ -257,7 +257,8 @@ class Fanotify(mp.Process):
 
     def mark(self, path: Union[str, Iterable], ev_types: int = FAN_ALL_EVENTS,
              is_type: str = '', dont_follow: bool = False,
-             as_ignore: bool = False, remove: bool = False) -> None:
+             as_ignore: bool = False, remove: bool = False,
+             dirfd: int = AT_FDCWD) -> None:
         """
         To detail see **man fanotify_mark**
 
@@ -281,6 +282,7 @@ class Fanotify(mp.Process):
         :param remove: if `True`, events in `ev_types` will be removed from
             the mark mask (or from ignore mask);
             else events will be added to the mark mask (or to ignore mask).
+        :param dirfd: used with `path`. see man
         """
 
         if ev_types & (FAN_OPEN_PERM | FAN_ACCESS_PERM | FAN_OPEN_EXEC_PERM):
@@ -305,7 +307,7 @@ class Fanotify(mp.Process):
                 flags |= FAN_MARK_IGNORED_MASK | FAN_MARK_IGNORED_SURV_MODIFY
 
             try:
-                ext.mark(self._ctx, flags, ev_types, AT_FDCWD, path)
+                ext.mark(self._ctx, flags, ev_types, dirfd, path)
                 # self._debug('%s is marked', path)
             except OSError as e:
                 msg = 'mark(): %s' % e
