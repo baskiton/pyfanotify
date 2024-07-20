@@ -556,7 +556,7 @@ do_write(int fd, const void *data, size_t len)
 static void
 do_log(fano_ctx_t *ctx, const char *fmt, ...)
 {
-    if (ctx->fano_fd < 0)
+    if (ctx->log_fd < 0)
         return;
 
     char msg[4096];
@@ -573,7 +573,7 @@ do_log(fano_ctx_t *ctx, const char *fmt, ...)
     if (len > sizeof(msg) - hdr_len)
         len = sizeof(msg) - hdr_len;
     *(uint32_t *)msg = len;
-    do_write(ctx->fano_fd, &msg, len + hdr_len);
+    do_write(ctx->log_fd, &msg, len + hdr_len);
 }
 
 static ssize_t
@@ -678,9 +678,10 @@ handle_events(fano_ctx_t *ctx)
             // skip ours
             continue;
 
-        str_val_t exe, cwd, path, evt;
-        exe.buf[0] = cwd.buf[0] = path.buf[0] = evt.buf[0] = '\0';
-        exe.len = cwd.len = path.len = evt.len = 0;
+        int fnames = 0;
+        str_val_t exe[1], cwd[1], path[2], evt;
+        exe[0].buf[0] = cwd[0].buf[0] = path[0].buf[0] = path[1].buf[0] = evt.buf[0] = '\0';
+        exe[0].len = cwd[0].len = path[0].len = path[1].len = evt.len = 0;
         c_rule_t to_del;
 
 #ifdef FAN_REPORT_FID
@@ -690,21 +691,30 @@ handle_events(fano_ctx_t *ctx)
 //            struct fanotify_event_info_pidfd *pidfd;
 //            struct fanotify_event_info_error *ierror;
             struct file_handle *file_handle = NULL;
-            const char *file_name = NULL;
+            const char *file_name[2] = {};
             ssize_t info_len = ev->event_len - ev->metadata_len;
             ssize_t rest = info_len;
             int ffd = FAN_NOFD, dfd = FAN_NOFD, *_fd = NULL;
 
             int cont = 0;
             while (rest) {
+                int with_fname = 1;
                 switch (finfo->info_type) {
                 case FAN_EVENT_INFO_TYPE_FID:
+                    with_fname = 0;
 # ifdef FAN_REPORT_DIR_FID
                 case FAN_EVENT_INFO_TYPE_DFID:
+                    with_fname = 0;
                 case FAN_EVENT_INFO_TYPE_DFID_NAME:
 # endif // FAN_REPORT_DIR_FID
+# ifdef FAN_RENAME
+                case FAN_EVENT_INFO_TYPE_OLD_DFID_NAME:
+                case FAN_EVENT_INFO_TYPE_NEW_DFID_NAME:
+# endif // FAN_RENAME
                     fid = (struct fanotify_event_info_fid *)finfo;
                     file_handle = (struct file_handle *)fid->handle;
+                    if (with_fname)
+                        file_name[fnames++] = (char *)(file_handle->f_handle + file_handle->handle_bytes);
                     break;
 //                case FAN_EVENT_INFO_TYPE_PIDFD:
 //                    pidfd = (struct fanotify_event_info_pidfd *)finfo;
@@ -713,17 +723,19 @@ handle_events(fano_ctx_t *ctx)
 //                    ierror = (struct fanotify_event_info_error *)finfo;
 //                    break;
                 default:
-//                    do_log(log_fd, "Fanotify: invalid info_type: %d\n\n", finfo->info_type);
+//                    do_log(ctx, "Fanotify: invalid info_type: 0x%02X\n", finfo->info_type);
                     close(ffd);
                     close(dfd);
                     goto fid_end;
                 }
-# ifdef FAN_REPORT_DIR_FID
-                if (finfo->info_type == FAN_EVENT_INFO_TYPE_DFID_NAME)
-                    file_name = (char *)(file_handle->f_handle + file_handle->handle_bytes);
-# endif // FAN_REPORT_DIR_FID
 
-                if (ev->mask & (FAN_CREATE|FAN_DELETE|FAN_MOVE))
+# ifdef FAN_RENAME
+#  define FAN_FLAGS (FAN_CREATE|FAN_DELETE|FAN_MOVE|FAN_RENAME)
+# else
+#  define FAN_FLAGS (FAN_CREATE|FAN_DELETE|FAN_MOVE)
+# endif
+
+                if (ev->mask & FAN_FLAGS)
                     _fd = &dfd;
                 else if (finfo->info_type == FAN_EVENT_INFO_TYPE_FID)
                     _fd = &ffd;
@@ -749,8 +761,8 @@ handle_events(fano_ctx_t *ctx)
                 close(dfd);
                 dfd = -1;
             } else if (dfd != FAN_NOFD) {
-                if (file_name && !(ev->mask & (FAN_CREATE|FAN_DELETE|FAN_MOVE))) {
-                    ev->fd = openat(dfd, file_name, O_FLAGS);
+                if (fnames && !(ev->mask & FAN_FLAGS)) {
+                    ev->fd = openat(dfd, file_name[0], O_FLAGS);
                     if (ev->fd == FAN_NOFD)
                         ev->fd = dfd;
                     else {
@@ -759,10 +771,12 @@ handle_events(fano_ctx_t *ctx)
                     }
                 } else
                     ev->fd = dfd;
-                if (file_name && ev->fd == dfd) {
-                    path.len = get_proc_str("/proc/self/fd/%d", dfd, path.buf, sizeof(path.buf));
-                    path.buf[path.len] = '/';
-                    path.len = stpncpy(path.buf + path.len + 1, file_name, sizeof(path.buf) - path.len - 1) - path.buf;
+                if (fnames && ev->fd == dfd) {
+                    for (int i = 0; i < fnames; ++i) {
+                        path[i].len = (dfd >= 0) ? get_proc_str("/proc/self/fd/%d", dfd, path[i].buf, sizeof(path[i].buf)) : 0;
+                        path[i].buf[path[i].len] = '/';
+                        path[i].len = stpncpy(path[i].buf + path[i].len + 1, file_name[i], sizeof(path[i].buf) - path[i].len - 1) - path[i].buf;
+                    }
                 }
             } else
                 cont = 1;
@@ -770,21 +784,23 @@ handle_events(fano_ctx_t *ctx)
             if (cont)
                 continue;
         }
+# undef FAN_FLAGS
 #endif // FAN_REPORT_FID
 
         for (c_rule_t *rule = ctx->rules; rule; rule = rule->next) {
 
-# define RULE_MATCH(name, fmt, meta)    \
-        (rule->name##_pattern.len       \
-            && (!((name).buf[0]         \
-                    || ((name).len = get_proc_str(fmt, ev->meta, (name).buf, sizeof((name).buf))))  \
-                || fnmatch(rule->name##_pattern.buf, (name).buf, FNM_EXTMATCH)))
+# define RULE_MATCH(name, fmt, meta, i)     \
+        (rule->name##_pattern.len           \
+            && (!(((name)[i]).buf[0]        \
+                    || (((name)[i]).len = get_proc_str(fmt, ev->meta, ((name)[i]).buf, sizeof(((name)[i]).buf))))  \
+                || fnmatch(rule->name##_pattern.buf, ((name)[i]).buf, FNM_EXTMATCH)))
 
             if (rule_pids_check(rule, ev->pid)
                     || (rule->ev_types && !(rule->ev_types & ev->mask))
-                    || RULE_MATCH(exe, "/proc/%ld/exe", pid)
-                    || RULE_MATCH(cwd, "/proc/%ld/cwd", pid)
-                    || RULE_MATCH(path, "/proc/self/fd/%ld", fd))
+                    || RULE_MATCH(exe, "/proc/%ld/exe", pid, 0)
+                    || RULE_MATCH(cwd, "/proc/%ld/cwd", pid, 0)
+                    || RULE_MATCH(path, "/proc/self/fd/%ld", fd, 0)
+                    || RULE_MATCH(path, "/proc/self/fd/%ld", fd, 1))
                 continue;
 # undef RULE_MATCH
 
@@ -795,9 +811,10 @@ handle_events(fano_ctx_t *ctx)
             } data = {ev->pid, ev->mask};
             struct iovec iov[] = {
                     {&data, sizeof(data)},
-                    {&exe, exe.len + sizeof(exe.len)},
-                    {&cwd, cwd.len + sizeof(exe.len)},
-                    {&path, path.len + sizeof(exe.len)},
+                    {exe,  exe[0].len + sizeof(exe[0].len)},
+                    {cwd,  cwd[0].len + sizeof(exe[0].len)},
+                    {&path[0], path[0].len + sizeof(exe[0].len)},
+                    {&path[1], path[1].len + sizeof(exe[0].len)},
             };
             struct sockaddr_un addr = {.sun_family = AF_UNIX};
             memcpy(addr.sun_path + 1, rule->name.buf, rule->name.len);
@@ -806,7 +823,7 @@ handle_events(fano_ctx_t *ctx)
                     .msg_namelen = rule->name.len + offsetof(struct sockaddr_un, sun_path) + 1,
                     .msg_flags = 0,
                     .msg_iov = iov,
-                    .msg_iovlen = sizeof(iov) / sizeof(*iov),
+                    .msg_iovlen = (sizeof(iov) / sizeof(*iov)) - (2 - (fnames?:1)),
             };
             struct __attribute__((packed)) {
                 struct cmsghdr cm;
@@ -827,8 +844,7 @@ handle_events(fano_ctx_t *ctx)
                         continue;
 
                     int e = errno;
-                    do_log(ctx, "FileMonitor: send_data error for %s: %s",
-                          rule->name.buf, strerror(e));
+                    do_log(ctx, "FileMonitor: send_data error for %s: %s", rule->name.buf, strerror(e));
                     if (e == ECONNREFUSED) {
                         do_log(ctx, "FileMonitor: delete \"%s\"", rule->name.buf);
                         to_del.next = rule->next;

@@ -411,14 +411,14 @@ class FanotifyData(dict):
     """
 
     def __init__(self, fd: int = -1, pid: int = 0, ev_types: int = 0,
-                 exe: str = None, cwd: str = None, path: str = None):
+                 exe: str = None, cwd: str = None, path: Tuple[str] = ()):
         """
         :param fd: File descriptor if passed
         :param pid: PID of caused process
         :param ev_types: Event types of fanotify event
         :param exe: EXE of the event caused process if passed
         :param cwd: CWD of the event caused process if passed
-        :param path: PATH of the event caused file if passed
+        :param path: tuple of PATH of the event caused file if passed
         """
 
         super().__init__(fd=fd, pid=pid, ev_types=ev_types, exe=exe, cwd=cwd, path=path)
@@ -490,15 +490,22 @@ class FanotifyClient:
         for level, ty, fd in anc:
             if level == socket.SOL_SOCKET and ty == socket.SCM_RIGHTS:
                 fds = array.array('i')
-                fds.fromstring(fd)
+                fds.frombytes(fd)
                 res.fd = fds[0]
         res.pid, res.ev_types = self._PID_EVT_S.unpack_from(msg, 0)
         off = self._PID_EVT_S.size
-        for i in 'exe', 'cwd', 'path':
+        for i in 'exe', 'cwd':
             sz, = self._P_SZ_S.unpack_from(msg, off)
             off += self._P_SZ_S.size
             res[i] = msg[off:off + sz]
             off += sz
+        p = []
+        while len(msg) - off:
+            sz, = self._P_SZ_S.unpack_from(msg, off)
+            off += self._P_SZ_S.size
+            p.append(msg[off:off + sz])
+            off += sz
+        res['path'] = tuple(p)
         return res
 
 
